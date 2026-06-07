@@ -7,7 +7,6 @@ Waveform viewer for Neovim
 ## Requirements
 
 - Neovim ≥ 0.12
-- Rust toolchain (to compile the parser binary)
 
 ## Installation
 
@@ -15,7 +14,6 @@ Waveform viewer for Neovim
 ```lua
 {
   "hikamaree/wave.nvim",
-  build = "cargo build --release --manifest-path cmd/Cargo.toml",
   opts = {},
 }
 ```
@@ -25,9 +23,11 @@ Waveform viewer for Neovim
 vim.pack.add({
   { src = "https://github.com/hikamaree/wave.nvim" },
 })
+require("wave").setup({})
 ```
 
-Make sure to compile the Rust binary first (see [Building](#building)).
+The parser binary is downloaded automatically from GitHub Releases on first `setup()`.  
+To build from source instead, see [Building](#building).
 
 ## Setup
 
@@ -70,8 +70,12 @@ VCD/FST/GHW files also open automatically via `BufReadCmd`.
 
 ## Building
 
+The binary is auto-downloaded from GitHub Releases on first use.  
+To build from source locally:
+
 ```bash
 cd cmd && cargo build --release
 ```
 
-The binary is looked up in order: `config.parser_binary` → `stdpath("data")/wave/wave` → `$PATH` → plugin directory.
+Requires the Rust toolchain.  
+The binary is looked up in order: `config.parser_binary` → `stdpath("data")/wave/wave` → `$PATH` → local build → GitHub Releases download.

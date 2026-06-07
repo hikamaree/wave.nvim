@@ -20,7 +20,6 @@ struct Request {
     signal_ids: Option<Vec<u32>>,
     search_query: Option<String>,
     scope_id: Option<u32>,
-    time: Option<u64>,
     paths: Option<Vec<String>>,
     netlist_ids: Option<Vec<u32>>,
     start_index: Option<u32>,
@@ -141,8 +140,6 @@ impl AppState {
 
 fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, String> {
     let file = File::open(path).map_err(|e| format!("Cannot open file: {}", e))?;
-    let metadata = file.metadata().map_err(|e| format!("Cannot read metadata: {}", e))?;
-    let file_size = metadata.len();
 
     let load_opts = LoadOptions {
         multi_thread: false,
@@ -402,7 +399,6 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
     }
 
     let lower_query = query.to_lowercase();
-    let scope_parts: Vec<&str> = lower_query.split('.').collect();
 
     let search_scope = if scope_id != 0xFFFFFFFF {
         ScopeRef::from_index(scope_id as usize).map(|sr| hierarchy.index(sr))
@@ -478,10 +474,8 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
     serde_json::to_value(result).map_err(|e| format!("Serialize error: {}", e))
 }
 
-fn cmd_get_values_at_time(state: &AppState, time: u64, paths: &[String]) -> Result<serde_json::Value, String> {
+fn cmd_get_values_at_time(state: &AppState, paths: &[String]) -> Result<serde_json::Value, String> {
     let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
-    let signal_source = state.signal_source.as_ref().ok_or("No signal source")?;
-    let time_table = state.time_table.as_ref().ok_or("No time table")?;
 
     let mut signal_refs = Vec::new();
     let mut path_map: Vec<(String, SignalRef)> = Vec::new();
@@ -576,7 +570,7 @@ fn main() {
                 cmd_search(&state, req.search_query.as_deref().unwrap_or(""), req.scope_id.unwrap_or(0xFFFFFFFF))
             }
             "get_values_at_time" => {
-                cmd_get_values_at_time(&state, req.time.unwrap_or(0), req.paths.as_deref().unwrap_or(&[]))
+                cmd_get_values_at_time(&state, req.paths.as_deref().unwrap_or(&[]))
             }
             "get_enum_data" => {
                 cmd_get_enum_data(&state, req.netlist_ids.as_deref().unwrap_or(&[]))

@@ -1,0 +1,31 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux
+            runner: ubuntu-latest
+          - target: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - target: x86_64-macos
+            runner: macos-13
+          - target: aarch64-macos
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo build --release --manifest-path cmd/Cargo.toml
+      - run: cp cmd/target/release/wave wave-${{ matrix.target }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: wave-*

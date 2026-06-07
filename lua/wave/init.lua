@@ -17,6 +17,7 @@ local config = require("wave.config")
 local Parser = require("wave.parser")
 local viewer = require("wave.viewer")
 local netlist = require("wave.netlist")
+local download = require("wave.download")
 
 local M = {}
 
@@ -38,9 +39,14 @@ function M.setup(opts)
     binary_path = plugin_root .. "/cmd/target/release/wave"
   end
   if vim.fn.executable(binary_path) == 0 then
-    vim.notify("[wave] Parser binary not found. Build with: cd cmd && cargo build --release, then copy to "
-      .. vim.fn.stdpath("data") .. "/wave/wave", vim.log.levels.WARN)
-    return
+    local downloaded = download.download()
+    if downloaded then
+      binary_path = downloaded
+    else
+      vim.notify("[wave] Parser binary not found. Build with: cd cmd && cargo build --release, then copy to "
+        .. vim.fn.stdpath("data") .. "/wave/wave", vim.log.levels.WARN)
+      return
+    end
   end
 
   parser = Parser.create_parser(binary_path)
