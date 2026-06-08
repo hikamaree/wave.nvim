@@ -1,6 +1,8 @@
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("wave_renderer")
+local EPS = 1e-12
+local MAX_MARKER_DIVISOR = 8
 
 local function resolve_color(c, key_prefix, fallback)
   local hl_key = key_prefix .. "_hl"
@@ -24,9 +26,15 @@ function M.setup_highlights()
   pcall(vim.api.nvim_set_hl, 0, "WaveLabel", { fg = lbl })
 end
 
-local function time_to_col(t, time_start, time_range, width)
+-- Returns the 0-indexed column in the waveform string where the point t is displayed.
+-- An edge at time t rendered by _build_col_val at column K (first with col_time >= t)
+-- appears at top_str[K-1] (0-indexed). So time_to_col(t) = K-1.
+function M.time_to_col(t, time_start, time_range, width)
   if time_range <= 0 then return 0 end
-  return math.floor(((t - time_start) / time_range) * width)
+  local col = math.ceil(((t - time_start) / time_range) * width) - 1
+  if col < 0 then return 0 end
+  if col >= width then return width - 1 end
+  return col
 end
 
 local function fmt_val(v)
@@ -41,21 +49,22 @@ local function fmt_val(v)
   return v
 end
 
-local function _build_col_val(value_changes, time_start, time_end, width)
+local function _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
   local time_range = time_end - time_start
   local col_val = {}
   local vc_idx = 1
   for col = 0, width do
-    local col_time = time_start + (col / width) * time_range
-    while vc_idx < #value_changes and tonumber(value_changes[vc_idx + 1][1]) <= col_time do
+    local col_time = time_start + col * (time_range / width)
+    while vc_idx < #value_changes and tonumber(value_changes[vc_idx + 1][1]) <= col_time + EPS do
       vc_idx = vc_idx + 1
     end
     col_val[col] = value_changes[vc_idx][2]
+    if col_vc_end then col_vc_end[col] = vc_idx end
   end
   return col_val
 end
 
-function M.is_high_freq(col_val, width, value_changes, time_start, time_range)
+local function is_high_freq(col_val, width, value_changes, time_start, time_range)
   local trans = 0
   for col = 0, width - 2 do
     if (col_val[col] == "1") ~= (col_val[col + 1] == "1") then trans = trans + 1 end
@@ -72,14 +81,14 @@ function M.is_high_freq(col_val, width, value_changes, time_start, time_range)
   return total > width
 end
 
-function M._render_high_freq(width)
+local function render_high_freq(width)
   local top = {}
   local bot = {}
   for c = 1, width do top[c] = "█"; bot[c] = "█" end
   return table.concat(top), table.concat(bot)
 end
 
-function M._render_low_freq(col_val, width)
+local function render_low_freq(col_val, width)
   local top = {}
   local bot = {}
   for c = 1, width do top[c] = " "; bot[c] = " " end
@@ -121,10 +130,10 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
 
   local col_val = _build_col_val(value_changes, time_start, time_end, width)
 
-  if M.is_high_freq(col_val, width, value_changes, time_start, time_end - time_start) then
-    return M._render_high_freq(width)
+  if is_high_freq(col_val, width, value_changes, time_start, time_end - time_start) then
+    return render_high_freq(width)
   end
-  return M._render_low_freq(col_val, width)
+  return render_low_freq(col_val, width)
 end
 
 function M.render_multi_bit(value_changes, time_start, time_end, width)
@@ -203,37 +212,68 @@ function M.render_value_table(signal, label_width)
   return lines
 end
 
-function M.render_ruler(time_start, time_end, width)
+local function _find_first_rise_time(value_changes, from_idx, to_idx)
+  for i = from_idx + 1, to_idx do
+    if value_changes[i - 1][2] == "0" and value_changes[i][2] == "1" then
+      return tonumber(value_changes[i][1])
+    end
+  end
+  return nil
+end
+
+function M.render_ruler(time_start, time_end, width, value_changes)
   local time_range = time_end - time_start
   local nums = {}
   local ticks = {}
   for i = 1, width do nums[i] = " "; ticks[i] = " " end
 
-  if time_range > 0 then
-    local raw_step = time_range / 10
-    local mag = 10 ^ math.floor(math.log10(raw_step))
-    local norm = raw_step / mag
-    local nice_step
-    if norm <= 1.5 then
-      nice_step = mag
-    elseif norm <= 3.5 then
-      nice_step = 2 * mag
-    elseif norm <= 7.5 then
-      nice_step = 5 * mag
-    else
-      nice_step = 10 * mag
+  if value_changes and #value_changes > 0 and time_range > 0 then
+    local col_vc_end = {}
+    local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
+
+    -- Collect rise columns (markers at actual edge positions)
+    local rise_cols = {}
+    for col = 0, width - 1 do
+      if col_val[col] == "0" and col_val[col + 1] == "1" then
+        table.insert(rise_cols, col)
+      end
     end
-    local t = math.ceil(time_start / nice_step) * nice_step
-    while t <= time_end do
-      local col = time_to_col(t, time_start, time_range, width)
-      if col >= 0 and col < width then
-        local s = tostring(math.floor(t))
-        for j = 0, #s - 1 do
-          if col + 1 + j <= width then nums[col + 1 + j] = s:sub(j + 1, j + 1) end
+
+    -- Place start tick at column 0
+    ticks[1] = "┃"
+
+    if #rise_cols >= 2 then
+      -- Sample rises to at most ~width/8 markers
+      local target = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
+      local step = math.ceil(#rise_cols / target)
+      for idx = 1, #rise_cols, step do
+        local col = rise_cols[idx]
+        local edge_time = _find_first_rise_time(value_changes, col_vc_end[col], col_vc_end[col + 1])
+        if not edge_time then
+          edge_time = time_start + (col + 1) * (time_range / width)
         end
         ticks[col + 1] = "┃"
+        local s = tostring(math.floor(edge_time))
+        local num_col = col + 1
+        for j = 0, #s - 1 do
+          local c = num_col + j
+          if c <= width then nums[c] = s:sub(j + 1, j + 1) end
+        end
       end
-      t = t + nice_step
+    else
+      -- Too few rises — periodic fallback
+      local n = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
+      local step = math.floor(width / n)
+      for col = step, width - 1, step do
+        local edge_time = time_start + col * (time_range / width)
+        ticks[col + 1] = "┃"
+        local s = tostring(math.floor(edge_time))
+        local num_col = col + 1
+        for j = 0, #s - 1 do
+          local c = num_col + j
+          if c <= width then nums[c] = s:sub(j + 1, j + 1) end
+        end
+      end
     end
   end
 

@@ -2,7 +2,6 @@ local M = {}
 
 M.defaults = {
   parser_binary = vim.fn.stdpath("data") .. "/wave/wave",
-  auto_open = true,
   keymaps = {
     toggle_viewer = "<leader>wv",
     toggle_netlist = "<leader>wn",
@@ -16,10 +15,6 @@ M.defaults = {
     marker_prev_edge = "<S-Left>",
     marker_next_edge = "<S-Right>",
     search_netlist = "<leader>wf",
-  },
-  window = {
-    width_ratio = 0.7,
-    height_ratio = 0.6,
   },
   colors = {
     signal = "#98c379",

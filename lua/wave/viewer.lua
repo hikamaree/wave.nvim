@@ -4,14 +4,31 @@ local renderer = require("wave.renderer")
 
 local M = {}
 
+local ZOOM_OUT_MARGIN = 1.05
+local LABEL_GAP = 3
+local MIN_WAVEFORM_WIDTH = 20
+local FIRST_SIGNAL_LINE = 5
+
 local state = {
   buf = nil, win = nil, parser = nil,
   time_start = 0, time_end = 1000, file_time_end = 1000,
   time_unit = "ns",
   cursor_time = nil,
-  time_scale = 1, event_count = 0, file_info = nil,
+  file_info = nil,
   label_width = 22,
+  zoom_n = -2,
 }
+
+local function _waveform_width()
+  return vim.api.nvim_win_get_width(state.win) - state.label_width - LABEL_GAP
+end
+
+local function _zoom_value(zoom_n)
+  if zoom_n >= 2 then return zoom_n
+  elseif zoom_n == 1 then return 1
+  end
+  return -1.0 / zoom_n
+end
 
 function M.setup(parser)
   state.parser = parser
@@ -48,7 +65,8 @@ function M.open(uri)
   end
 
   local buf = vim.api.nvim_create_buf(false, true)
-  local fname = uri and vim.fn.fnamemodify(uri, ":t") or "waveform"
+  state.file_name = uri and vim.fn.fnamemodify(uri, ":t") or "waveform"
+  local fname = state.file_name
   vim.api.nvim_buf_set_name(buf, "Wave: " .. fname)
 
   vim.bo[buf].buftype = "nofile"
@@ -82,9 +100,7 @@ function M.open(uri)
       state.file_info = { uri = uri }
       state.file_time_end = info.time_end or 1000
       state.time_end = state.file_time_end
-      state.time_scale = info.time_scale or 1
       state.time_unit = info.time_unit or "ns"
-      state.event_count = info.event_count or 0
       state.time_start = 0
       vim.schedule(function()
         vim.notify("[wave] Loaded: " .. fname .. " (" .. info.format .. ", " .. info.var_count .. " signals)")
@@ -173,7 +189,12 @@ function M.add_signal(netlist_id, signal_id, name, width)
       local data = resp.data[1]
       signals.set_value_changes(netlist_id, data.value_changes)
       vim.schedule(function()
-        if M.is_open() then M._render() end
+        if M.is_open() then
+          if state.time_end == state.file_time_end then
+            pcall(M._update_viewport_from_zoom)
+          end
+          M._render()
+        end
       end)
     end
   end)
@@ -218,6 +239,71 @@ function M.add_signal_prompt()
   end)
 end
 
+function M._detect_period()
+  local min_gap = math.huge
+  local min_period = math.huge
+  for _, sig in ipairs(signals.get_all()) do
+    if sig.width == 1 and sig.value_changes and #sig.value_changes >= 3 then
+      local last_rise, last_fall
+      for i = 1, #sig.value_changes - 1 do
+        local t = tonumber(sig.value_changes[i][1])
+        local nt = tonumber(sig.value_changes[i + 1][1])
+        if t and nt then
+          local gap = nt - t
+          if gap > 0 and gap < min_gap then min_gap = gap end
+          local v, nv = sig.value_changes[i][2], sig.value_changes[i + 1][2]
+          if v == "0" and nv == "1" then
+            if last_rise then
+              local p = t - last_rise
+              if p > 0 and p < min_period then min_period = p end
+            end
+            last_rise = t
+          elseif v == "1" and nv == "0" then
+            if last_fall then
+              local p = t - last_fall
+              if p > 0 and p < min_period then min_period = p end
+            end
+            last_fall = t
+          end
+        end
+      end
+    end
+  end
+  if min_period == math.huge then
+    if min_gap ~= math.huge then
+      min_period = min_gap * 2
+    else
+      min_period = nil
+    end
+  end
+  return min_period
+end
+
+function M._update_viewport_from_zoom()
+  local ww = _waveform_width()
+  if ww < MIN_WAVEFORM_WIDTH then return end
+
+  local period = M._detect_period()
+  if not period or period <= 0 then return end
+
+  local zoom = _zoom_value(state.zoom_n)
+  local col_width = period / zoom
+  local range = ww * col_width
+
+  -- Clamp: at most ZOOM_OUT_MARGIN × file, at least 2 periods
+  local max_range = (state.file_time_end or math.huge) * ZOOM_OUT_MARGIN
+  local min_range = math.min(period * 2, max_range)
+  range = math.max(min_range, math.min(range, max_range))
+
+  local center = state.cursor_time or (state.time_start + (state.time_end - state.time_start)) / 2
+  state.time_start = math.max(0, center - range / 2)
+  state.time_end = state.time_start + range
+  if state.time_end > max_range and state.time_start > 0 then
+    state.time_start = math.max(0, max_range - range)
+    state.time_end = max_range
+  end
+end
+
 local function _signal_block(sig)
   if sig.expanded and sig.value_changes then
     return 3 + #sig.value_changes
@@ -225,13 +311,13 @@ local function _signal_block(sig)
   return 3
 end
 
-local function _signal_lines(sig)
+local function _signal_lines()
   return 2
 end
 
 function M._signal_at_line(line)
   local all_signals = signals.get_all()
-  local cur = 5
+  local cur = FIRST_SIGNAL_LINE
   for _, sig in ipairs(all_signals) do
     local block = _signal_block(sig)
     if line >= cur and line < cur + block then
@@ -246,7 +332,7 @@ function M.remove_signal_at_cursor()
   if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
   local cursor = vim.api.nvim_win_get_cursor(state.win)
   local sig, cur = M._signal_at_line(cursor[1])
-  if sig and cursor[1] >= cur and cursor[1] < cur + _signal_lines(sig) then
+  if sig and cursor[1] >= cur and cursor[1] < cur + _signal_lines() then
     signals.remove_signal(sig.netlist_id)
     M._render()
   end
@@ -262,21 +348,50 @@ function M._toggle_signal_expand()
   end
 end
 
+local function _next_zoom_in()
+  if state.zoom_n == -2 then return 1
+  elseif state.zoom_n == 1 then return 2
+  else return state.zoom_n + 2
+  end
+end
+
+local function _next_zoom_out()
+  if state.zoom_n == 2 then return 1
+  elseif state.zoom_n == 1 then return -2
+  else return state.zoom_n - 2
+  end
+end
+
 function M.zoom_in()
-  local range = state.time_end - state.time_start
-  local center = state.cursor_time or (state.time_start + range / 2)
-  local new_range = range / 1.3
-  state.time_start = math.max(0, center - new_range / 2)
-  state.time_end = math.min(state.file_time_end, state.time_start + new_range)
+  local next_n = _next_zoom_in()
+  local period = M._detect_period()
+  if period and period > 0 then
+    local ww = _waveform_width()
+    if ww >= MIN_WAVEFORM_WIDTH then
+      local new_range = ww * period / _zoom_value(next_n)
+      local cur_range = state.time_end - state.time_start
+      if new_range < period * 2 and cur_range <= period * 2 then return end
+    end
+  end
+  state.zoom_n = next_n
+  M._update_viewport_from_zoom()
   M._render()
 end
 
 function M.zoom_out()
-  local range = state.time_end - state.time_start
-  local center = state.cursor_time or (state.time_start + range / 2)
-  local new_range = range * 1.3
-  state.time_start = math.max(0, center - new_range / 2)
-  state.time_end = math.min(state.file_time_end, state.time_start + new_range)
+  local next_n = _next_zoom_out()
+  local period = M._detect_period()
+  if period and period > 0 and state.file_time_end then
+    local ww = _waveform_width()
+    if ww >= MIN_WAVEFORM_WIDTH then
+      local new_range = ww * period / _zoom_value(next_n)
+      local cur_range = state.time_end - state.time_start
+      local zoom_out_limit = state.file_time_end * ZOOM_OUT_MARGIN
+      if new_range > zoom_out_limit and cur_range >= zoom_out_limit then return end
+    end
+  end
+  state.zoom_n = next_n
+  M._update_viewport_from_zoom()
   M._render()
 end
 
@@ -287,12 +402,12 @@ function M.zoom_fit()
 end
 
 function M._clamp_view()
-  local max_t = state.file_time_end or math.huge
-  local range = state.time_end - state.time_start
+  local max_t = (state.file_time_end or math.huge) * ZOOM_OUT_MARGIN
+  local prev_range = state.time_end - state.time_start
   if state.time_start < 0 then state.time_start = 0 end
   if state.time_end > max_t then state.time_end = max_t end
-  if state.time_end - state.time_start < range * 0.5 then
-    state.time_start = math.max(0, state.time_end - range)
+  if state.time_end - state.time_start < prev_range * 0.5 then
+    state.time_start = math.max(0, state.time_end - prev_range)
   end
 end
 
@@ -396,23 +511,31 @@ function M._render()
   local lines = {}
   local hlmarks = {}
   local lw = state.label_width
-  local ww = win_width - lw - 3
-  if ww < 20 then ww = 20 end
+  local ww = math.max(win_width - lw - LABEL_GAP, MIN_WAVEFORM_WIDTH)
 
   -- Header
   local header = ""
-  if state.file_info then
-    header = header .. vim.fn.fnamemodify(state.file_info.uri, ":t")
+  if state.file_name then
+    header = header .. state.file_name
   end
   local time_range = state.time_end - state.time_start
   header = header .. "  " .. math.floor(state.time_start) .. "-" .. math.floor(state.time_end) .. " " .. (state.time_unit or "ns")
   if state.cursor_time then
     header = header .. "  ────  @" .. math.floor(state.cursor_time)
   end
+  local zv = _zoom_value(state.zoom_n)
+  header = header .. string.format("  Z:%sx", zv >= 1 and math.floor(zv) or string.format("1/%d", -state.zoom_n))
   table.insert(lines, header)
 
-  -- Ruler
-  local num_line, tick_line = renderer.render_ruler(state.time_start, state.time_end, ww)
+  -- Ruler: use first single-bit signal with data
+  local ruler_vc
+  for _, sig in ipairs(signals.get_all()) do
+    if sig.width == 1 and sig.value_changes and #sig.value_changes > 0 then
+      ruler_vc = sig.value_changes
+      break
+    end
+  end
+  local num_line, tick_line = renderer.render_ruler(state.time_start, state.time_end, ww, ruler_vc)
   table.insert(lines, string.rep(" ", lw + 1) .. num_line)
   table.insert(lines, string.rep(" ", lw + 1) .. tick_line)
   table.insert(lines, "")
@@ -422,7 +545,7 @@ function M._render()
   if state.cursor_time then
     local time_range = state.time_end - state.time_start
     if time_range > 0 then
-      cursor_col = math.min(math.floor((state.cursor_time - state.time_start) / time_range * ww), ww - 1)
+      cursor_col = renderer.time_to_col(state.cursor_time, state.time_start, time_range, ww)
     end
   end
 
@@ -453,8 +576,7 @@ function M._render()
           top_str, bot_str = renderer.render_single_bit(sig.value_changes, state.time_start, state.time_end, ww)
         end
       else
-        top_str = string.rep(" ", ww)
-        if is_multi then top_str = top_str .. " (loading...)" end
+        top_str = string.rep(" ", ww) .. " (loading...)"
         bot_str = string.rep(" ", ww)
       end
       local top_ndx = #lines
@@ -471,7 +593,7 @@ function M._render()
         table.insert(hlmarks, { bot_ndx, lw + 1, #sig_bot, "WaveSignal" })
       end
       -- Multi-bit expanded value table
-      if is_multi and sig.expanded and sig.value_changes then
+      if is_multi and sig.expanded then
         local vlines = renderer.render_value_table(sig, lw)
         for _, vl in ipairs(vlines) do
           table.insert(lines, vl)
@@ -503,16 +625,17 @@ function M._render()
   end
   -- Cursor vertical bar through waveform area (skip header and info)
   if cursor_col then
+    -- cursor_col is 0-indexed position in top_str. top_str starts at character
+    -- position lw+1 in the signal line (0-indexed). So absolute character
+    -- position in the line is lw + 1 + cursor_col.
     local abs_col = cursor_col + lw + 1
     for i = 4, #lines - 2 do
-      local byte_col = vim.fn.byteidx(lines[i], abs_col)
-      if byte_col >= 0 then
-        vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, byte_col, {
-          virt_text = { { "┃", "WaveCursor" } },
-          virt_text_pos = "overlay",
-          priority = 1000,
-        })
-      end
+      local prefix = vim.fn.strcharpart(lines[i], 0, abs_col)
+      vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, #prefix, {
+        virt_text = { { "┃", "WaveCursor" } },
+        virt_text_pos = "overlay",
+        priority = 1000,
+      })
     end
   end
 
