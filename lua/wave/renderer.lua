@@ -84,7 +84,7 @@ end
 local function render_high_freq(width)
   local top = {}
   local bot = {}
-  for c = 1, width do top[c] = "█"; bot[c] = "█" end
+  for c = 1, width do top[c] = "┬"; bot[c] = "┴" end
   return table.concat(top), table.concat(bot)
 end
 

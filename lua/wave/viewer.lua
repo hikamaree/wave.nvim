@@ -629,7 +629,7 @@ function M._render()
     -- position lw+1 in the signal line (0-indexed). So absolute character
     -- position in the line is lw + 1 + cursor_col.
     local abs_col = cursor_col + lw + 1
-    for i = 4, #lines - 2 do
+    for i = 3, #lines - 2 do
       local prefix = vim.fn.strcharpart(lines[i], 0, abs_col)
       vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, #prefix, {
         virt_text = { { "┃", "WaveCursor" } },
