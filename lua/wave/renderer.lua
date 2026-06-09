@@ -4,6 +4,10 @@ local ns = vim.api.nvim_create_namespace("wave_renderer")
 local EPS = 1e-12
 local MAX_MARKER_DIVISOR = 8
 
+---@param c table
+---@param key_prefix string
+---@param fallback string|nil
+---@return string|nil
 local function resolve_color(c, key_prefix, fallback)
   local hl_key = key_prefix .. "_hl"
   if c[hl_key] then
@@ -26,9 +30,14 @@ function M.setup_highlights()
   pcall(vim.api.nvim_set_hl, 0, "WaveLabel", { fg = lbl })
 end
 
--- Returns the 0-indexed column in the waveform string where the point t is displayed.
--- An edge at time t rendered by _build_col_val at column K (first with col_time >= t)
--- appears at top_str[K-1] (0-indexed). So time_to_col(t) = K-1.
+--- Returns the 0-indexed column in the waveform string where the point t is displayed.
+--- An edge at time t rendered by _build_col_val at column K (first with col_time >= t)
+--- appears at top_str[K-1] (0-indexed). So time_to_col(t) = K-1.
+---@param t number
+---@param time_start number
+---@param time_range number
+---@param width number
+---@return number
 function M.time_to_col(t, time_start, time_range, width)
   if time_range <= 0 then return 0 end
   local col = math.ceil(((t - time_start) / time_range) * width) - 1
@@ -37,18 +46,22 @@ function M.time_to_col(t, time_start, time_range, width)
   return col
 end
 
+---@param v string
+---@return string
 local function fmt_val(v)
-  local bin = true
-  for ch in v:gmatch(".") do
-    if ch ~= "0" and ch ~= "1" then bin = false; break end
-  end
-  if bin and #v > 1 then
+  if #v > 1 and not v:find("[^01]") then
     local d = tonumber(v, 2)
     if d then return string.format("0x%X", d) end
   end
   return v
 end
 
+---@param value_changes table
+---@param time_start number
+---@param time_end number
+---@param width number
+---@param col_vc_end table|nil
+---@return table
 local function _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
   local time_range = time_end - time_start
   local col_val = {}
@@ -64,6 +77,9 @@ local function _build_col_val(value_changes, time_start, time_end, width, col_vc
   return col_val
 end
 
+---@param col_vc_end table
+---@param width number
+---@return table
 local function _col_vc_counts(col_vc_end, width)
   local counts = {}
   for col = 0, width - 1 do
@@ -72,6 +88,11 @@ local function _col_vc_counts(col_vc_end, width)
   return counts
 end
 
+---@param value_changes table|nil
+---@param time_start number
+---@param time_end number
+---@param width number
+---@return string, string
 function M.render_single_bit(value_changes, time_start, time_end, width)
   if not value_changes or #value_changes == 0 then
     return string.rep(" ", width), string.rep(" ", width)
@@ -81,8 +102,6 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
   local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
   local col_tc = _col_vc_counts(col_vc_end, width)
 
-  -- If a VC falls exactly at time_start, shift col_val[0] to the value before it
-  -- so the transition at the left edge is visible (counted in tc[0]).
   if col_vc_end[0] > 1 then
     local first_vc_time = tonumber(value_changes[col_vc_end[0]][1])
     if first_vc_time and math.abs(first_vc_time - time_start) <= EPS then
@@ -109,7 +128,9 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
       end
 
     elseif tc == 1 then
-      if v == "0" then
+      if v ~= "0" and v ~= "1" then
+        if nv == "1" then top[c] = "─" else bot[c] = "─" end
+      elseif nv == "1" then
         top[c] = "┌"
         bot[c] = "┘"
       else
@@ -118,17 +139,22 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
       end
 
     else -- tc >= 2
-      local prev_clean = (col == 0) or (col_tc[col - 1] <= 1)
-      local next_clean = (col == width - 1) or (col_tc[col + 1] <= 1)
-      if next_clean then
-        if v == "0" then top[c] = "┐"; bot[c] = "┴"
-        else top[c] = "┬"; bot[c] = "┘" end
-      elseif prev_clean then
-        if v == "0" then top[c] = "┌"; bot[c] = "┘"
-        else top[c] = "┐"; bot[c] = "└" end
+      if v ~= "0" and v ~= "1" then
+        top[c] = "─"
+        bot[c] = "─"
       else
-        top[c] = "┬"
-        bot[c] = "┴"
+        local prev_clean = (col == 0) or (col_tc[col - 1] <= 1)
+        local next_clean = (col == width - 1) or (col_tc[col + 1] <= 1)
+        if next_clean then
+          if v == "0" then top[c] = "┐"; bot[c] = "┴"
+          else top[c] = "┬"; bot[c] = "┘" end
+        elseif prev_clean then
+          if v == "0" then top[c] = "┌"; bot[c] = "┘"
+          else top[c] = "┐"; bot[c] = "└" end
+        else
+          top[c] = "┬"
+          bot[c] = "┴"
+        end
       end
     end
   end
@@ -136,6 +162,11 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
   return table.concat(top), table.concat(bot)
 end
 
+---@param value_changes table|nil
+---@param time_start number
+---@param time_end number
+---@param width number
+---@return string, string
 function M.render_multi_bit(value_changes, time_start, time_end, width)
   if not value_changes or #value_changes == 0 then
     return string.rep(" ", width), string.rep(" ", width)
@@ -147,34 +178,28 @@ function M.render_multi_bit(value_changes, time_start, time_end, width)
 
   local trans = {}
   for col = 0, width - 1 do
-    if col_val[col + 1] ~= col_val[col] then
+    if fmt_val(col_val[col + 1]) ~= fmt_val(col_val[col]) then
       table.insert(trans, col)
     end
   end
 
-  if #trans == 0 then
-    local v = fmt_val(col_val[0])
-    local vlen = math.min(#v, width)
-    for j = 1, vlen do top[j] = v:sub(j, j) end
-    for i = 1, width do
-      if top[i] == " " then top[i] = "─"; bot[i] = "─" end
+  local function _place_initial(v, start_col, end_col)
+    top[start_col] = "┌"; bot[start_col] = "└"
+    local vlen = math.min(#v, end_col - start_col)
+    for c = 1, end_col - start_col do
+      local idx = start_col + c
+      if c <= vlen then top[idx] = v:sub(c, c) else top[idx] = "─" end
+      bot[idx] = "─"
     end
+  end
+
+  if #trans == 0 then
+    _place_initial(fmt_val(col_val[0]), 1, width)
     return table.concat(top), table.concat(bot)
   end
 
   if trans[1] > 0 then
-    top[1] = "┌"
-    bot[1] = "└"
-    local init_v = fmt_val(col_val[0])
-    local init_len = math.min(#init_v, trans[1] - 1)
-    for c = 1, trans[1] - 1 do
-      if c <= init_len then
-        top[1 + c] = init_v:sub(c, c)
-      else
-        top[1 + c] = "─"
-      end
-      bot[1 + c] = "─"
-    end
+    _place_initial(fmt_val(col_val[0]), 1, trans[1])
   end
 
   for ti, col in ipairs(trans) do
@@ -200,6 +225,9 @@ function M.render_multi_bit(value_changes, time_start, time_end, width)
   return table.concat(top), table.concat(bot)
 end
 
+---@param signal table|nil
+---@param label_width number
+---@return string[]
 function M.render_value_table(signal, label_width)
   local lines = {}
   if not signal or not signal.value_changes or #signal.value_changes == 0 then
@@ -212,6 +240,10 @@ function M.render_value_table(signal, label_width)
   return lines
 end
 
+---@param value_changes table
+---@param from_idx number
+---@param to_idx number
+---@return number|nil
 local function _find_first_rise_time(value_changes, from_idx, to_idx)
   for i = from_idx + 1, to_idx do
     if value_changes[i - 1][2] == "0" and value_changes[i][2] == "1" then
@@ -221,6 +253,11 @@ local function _find_first_rise_time(value_changes, from_idx, to_idx)
   return nil
 end
 
+---@param time_start number
+---@param time_end number
+---@param width number
+---@param value_changes table|nil
+---@return string, string
 function M.render_ruler(time_start, time_end, width, value_changes)
   local time_range = time_end - time_start
   local nums = {}
@@ -231,7 +268,6 @@ function M.render_ruler(time_start, time_end, width, value_changes)
     local col_vc_end = {}
     local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
 
-    -- Collect rise columns (markers at actual edge positions)
     local rise_cols = {}
     for col = 0, width - 1 do
       if col_val[col] == "0" and col_val[col + 1] == "1" then
@@ -239,40 +275,32 @@ function M.render_ruler(time_start, time_end, width, value_changes)
       end
     end
 
-    -- Place start tick at column 0
     ticks[1] = "┃"
 
+    ---@param col number
+    ---@param edge_time number
+    local function _place(col, edge_time)
+      ticks[col + 1] = "┃"
+      local s = tostring(math.floor(edge_time))
+      for j = 0, #s - 1 do
+        local c = col + 1 + j
+        if c <= width then nums[c] = s:sub(j + 1, j + 1) end
+      end
+    end
+
     if #rise_cols >= 2 then
-      -- Sample rises to at most ~width/8 markers
       local target = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
       local step = math.ceil(#rise_cols / target)
       for idx = 1, #rise_cols, step do
         local col = rise_cols[idx]
         local edge_time = _find_first_rise_time(value_changes, col_vc_end[col], col_vc_end[col + 1])
-        if not edge_time then
-          edge_time = time_start + (col + 1) * (time_range / width)
-        end
-        ticks[col + 1] = "┃"
-        local s = tostring(math.floor(edge_time))
-        local num_col = col + 1
-        for j = 0, #s - 1 do
-          local c = num_col + j
-          if c <= width then nums[c] = s:sub(j + 1, j + 1) end
-        end
+        _place(col, edge_time or (time_start + (col + 1) * (time_range / width)))
       end
     else
-      -- Too few rises — periodic fallback
       local n = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
       local step = math.floor(width / n)
       for col = step, width - 1, step do
-        local edge_time = time_start + col * (time_range / width)
-        ticks[col + 1] = "┃"
-        local s = tostring(math.floor(edge_time))
-        local num_col = col + 1
-        for j = 0, #s - 1 do
-          local c = num_col + j
-          if c <= width then nums[c] = s:sub(j + 1, j + 1) end
-        end
+        _place(col, time_start + col * (time_range / width))
       end
     end
   end
@@ -280,6 +308,7 @@ function M.render_ruler(time_start, time_end, width, value_changes)
   return table.concat(nums), table.concat(ticks)
 end
 
+---@return number
 function M.get_ns()
   return ns
 end

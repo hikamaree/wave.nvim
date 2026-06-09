@@ -21,31 +21,36 @@ local download = require("wave.download")
 
 local M = {}
 
+---@type Parser|nil
 local parser
+
+---@type string|nil
 local current_file = nil
 
+---@param opts WaveConfig|nil
+---@return boolean
 function M.setup(opts)
   config.setup(opts)
 
-  local binary_path = config.options.parser_binary
-  if vim.fn.executable(binary_path) == 0 then
-    binary_path = vim.fn.stdpath("data") .. "/wave/wave"
+  local candidates = {
+    config.options.parser_binary,
+    vim.fn.stdpath("data") .. "/wave/wave",
+    "wave",
+    vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":p:h:h:h") .. "/cmd/target/release/wave",
+  }
+  local binary_path
+  for _, path in ipairs(candidates) do
+    if vim.fn.executable(path) ~= 0 then
+      binary_path = path
+      break
+    end
   end
-  if vim.fn.executable(binary_path) == 0 then
-    binary_path = "wave"
-  end
-  if vim.fn.executable(binary_path) == 0 then
-    local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":p:h:h:h")
-    binary_path = plugin_root .. "/cmd/target/release/wave"
-  end
-  if vim.fn.executable(binary_path) == 0 then
-    local downloaded = download.download()
-    if downloaded then
-      binary_path = downloaded
-    else
+  if not binary_path then
+    binary_path = download.download()
+    if not binary_path then
       vim.notify("[wave] Parser binary not found. Build with: cd cmd && cargo build --release, then copy to "
         .. vim.fn.stdpath("data") .. "/wave/wave", vim.log.levels.WARN)
-      return
+      return false
     end
   end
 
@@ -54,7 +59,7 @@ function M.setup(opts)
   local ok = parser:start()
   if not ok then
     vim.notify("[wave] Failed to start parser process", vim.log.levels.ERROR)
-    return
+    return false
   end
 
   viewer.setup(parser)
@@ -62,8 +67,10 @@ function M.setup(opts)
 
   M._register_commands()
   M._register_autocommands()
+  return true
 end
 
+---@param filepath string
 function M.open_file(filepath)
   if not parser then
     vim.notify("[wave] Parser not initialized. Call setup() first.", vim.log.levels.ERROR)
@@ -163,6 +170,13 @@ end
 
 function M._register_autocommands()
   local group = vim.api.nvim_create_augroup("WavePlugin", { clear = true })
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    group = group,
+    callback = function(args)
+      viewer.cleanup_buf(args.buf)
+      netlist.cleanup_buf(args.buf)
+    end,
+  })
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()

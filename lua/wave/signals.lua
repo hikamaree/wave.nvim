@@ -1,15 +1,23 @@
 --- Signal management: add, remove, group displayed signals.
 
-local M = {}
-
 ---@class DisplayedSignal
 ---@field netlist_id number
 ---@field signal_id number
 ---@field name string
 ---@field value_changes table|nil
 ---@field width number
+---@field expanded boolean
+
+local M = {}
+
+---@type DisplayedSignal[]
 local displayed_signals = {}
 
+---@param netlist_id number
+---@param signal_id number
+---@param name string
+---@param width number|nil
+---@return boolean, DisplayedSignal|string
 function M.add_signal(netlist_id, signal_id, name, width)
   for _, sig in ipairs(displayed_signals) do
     if sig.netlist_id == netlist_id then
@@ -17,6 +25,7 @@ function M.add_signal(netlist_id, signal_id, name, width)
     end
   end
 
+  ---@type DisplayedSignal
   local sig = {
     netlist_id = netlist_id,
     signal_id = signal_id,
@@ -30,6 +39,8 @@ function M.add_signal(netlist_id, signal_id, name, width)
   return true, sig
 end
 
+---@param netlist_id number
+---@return boolean
 function M.remove_signal(netlist_id)
   for i, sig in ipairs(displayed_signals) do
     if sig.netlist_id == netlist_id then
@@ -44,10 +55,13 @@ function M.remove_all()
   displayed_signals = {}
 end
 
+---@return DisplayedSignal[]
 function M.get_all()
   return displayed_signals
 end
 
+---@param netlist_id number
+---@return DisplayedSignal|nil
 function M.get_by_netlist_id(netlist_id)
   for _, sig in ipairs(displayed_signals) do
     if sig.netlist_id == netlist_id then
@@ -57,6 +71,19 @@ function M.get_by_netlist_id(netlist_id)
   return nil
 end
 
+---@param signal_id number
+---@return DisplayedSignal|nil
+function M.get_by_signal_id(signal_id)
+  for _, sig in ipairs(displayed_signals) do
+    if sig.signal_id == signal_id then
+      return sig
+    end
+  end
+  return nil
+end
+
+---@param netlist_id number
+---@param value_changes table|nil
 function M.set_value_changes(netlist_id, value_changes)
   local sig = M.get_by_netlist_id(netlist_id)
   if sig then

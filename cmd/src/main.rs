@@ -1,17 +1,18 @@
 use wellen::{
-    FileFormat, Hierarchy, ScopeRef, SignalRef, SignalSource, TimeTable,
-    TimescaleUnit, VarRef, LoadOptions,
+    Hierarchy, Scope, ScopeRef, SignalRef, SignalSource, TimeTable,
+    TimescaleUnit, LoadOptions,
 };
 use wellen::viewers::{read_body, read_header};
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::ops::Index;
 use std::fs::File;
 use std::collections::HashMap;
 
-// ─── Data structures for JSON protocol ───
+// ─── Data structures for msgpack protocol ───
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct Request {
     cmd: String,
     request_id: Option<u64>,
@@ -20,17 +21,38 @@ struct Request {
     signal_ids: Option<Vec<u32>>,
     search_query: Option<String>,
     scope_id: Option<u32>,
-    paths: Option<Vec<String>>,
-    netlist_ids: Option<Vec<u32>>,
     start_index: Option<u32>,
+    time_start: Option<u64>,
+    time_end: Option<u64>,
 }
 
 #[derive(Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 struct Response {
     request_id: u64,
     success: bool,
-    data: serde_json::Value,
+    #[serde(with = "rmpv_serde")]
+    data: rmpv::Value,
     error: Option<String>,
+    chunk: Option<bool>,
+}
+
+mod rmpv_serde {
+    use serde::{Serialize, Serializer};
+    #[cfg(test)] use serde::{Deserialize, Deserializer};
+
+    pub fn serialize<S>(val: &rmpv::Value, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer
+    {
+        val.serialize(serializer)
+    }
+
+    #[cfg(test)]
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<rmpv::Value, D::Error>
+    where D: Deserializer<'de>
+    {
+        rmpv::Value::deserialize(deserializer)
+    }
 }
 
 #[derive(Serialize)]
@@ -39,7 +61,6 @@ struct FileInfo {
     scope_count: u32,
     var_count: u32,
     time_unit: String,
-    time_scale: u32,
     time_end: u64,
     event_count: usize,
     top_scopes: Vec<ScopeInfo>,
@@ -75,12 +96,10 @@ struct ChildrenResult {
     remaining_items: i32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SignalDataResult {
     signal_id: u32,
-    value_changes: Vec<[String; 2]>,
-    min: f64,
-    max: f64,
+    value_changes: Vec<(u64, String)>,
 }
 
 #[derive(Serialize)]
@@ -102,10 +121,36 @@ struct SearchResult {
     search_results: Vec<SearchEntry>,
 }
 
-#[derive(Serialize)]
-struct ValuesAtTimeResult {
-    instance_path: String,
-    value: String,
+// ─── Error type ───
+
+#[derive(Debug)]
+enum AppError {
+    NoFile,
+    Io(io::Error),
+    Wellen(String),
+    Serialize(String),
+    Illegal(u32),
+    File(String),
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::NoFile => write!(f, "No file loaded"),
+            AppError::Io(e) => write!(f, "I/O error: {}", e),
+            AppError::Wellen(s) => write!(f, "{}", s),
+            AppError::Serialize(s) => write!(f, "Serialize error: {}", s),
+            AppError::Illegal(id) => write!(f, "Invalid scope ID: {}", id),
+            AppError::File(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl From<io::Error> for AppError { fn from(e: io::Error) -> Self { AppError::Io(e) } }
+
+fn to_msgpack<T: Serialize>(val: &T) -> Result<rmpv::Value, AppError> {
+    let bytes = rmp_serde::to_vec_named(val).map_err(|e| AppError::Serialize(e.to_string()))?;
+    rmpv::decode::read_value(&mut std::io::Cursor::new(&bytes)).map_err(|e| AppError::Serialize(e.to_string()))
 }
 
 // ─── Global state ───
@@ -114,9 +159,7 @@ struct AppState {
     hierarchy: Option<Hierarchy>,
     signal_source: Option<SignalSource>,
     time_table: Option<TimeTable>,
-    file_format: FileFormat,
     time_unit: String,
-    time_scale: u32,
     time_end: u64,
     param_table: Option<HashMap<u32, String>>,
 }
@@ -127,19 +170,93 @@ impl AppState {
             hierarchy: None,
             signal_source: None,
             time_table: None,
-            file_format: FileFormat::Unknown,
             time_unit: "ns".to_string(),
-            time_scale: 1,
             time_end: 0,
             param_table: None,
         }
     }
 }
 
+// ─── Msgpack framing helpers ───
+
+fn read_frame(reader: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn write_frame(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+    let len = payload.len() as u32;
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(payload)
+}
+
+fn to_value_or_nil<T: Serialize>(val: &T) -> rmpv::Value {
+    rmp_serde::to_vec_named(val)
+        .ok()
+        .and_then(|bytes| rmpv::decode::read_value(&mut std::io::Cursor::new(&bytes)).ok())
+        .unwrap_or(rmpv::Value::Nil)
+}
+
+fn send_response(
+    writer: &mut impl Write,
+    request_id: u64,
+    success: bool,
+    data: rmpv::Value,
+    error: Option<String>,
+    chunk: Option<bool>,
+) -> io::Result<()> {
+    let resp = Response {
+        request_id,
+        success,
+        data,
+        error,
+        chunk,
+    };
+    match rmp_serde::to_vec_named(&resp) {
+        Ok(payload) => {
+            write_frame(writer, &payload)?;
+            writer.flush()
+        }
+        Err(e) => {
+            // Even the fallback serialization can fail; try to write an error frame
+            let fallback = Response {
+                request_id,
+                success: false,
+                data: rmpv::Value::Nil,
+                error: Some(format!("Serialization error: {}", e)),
+                chunk: None,
+            };
+            if let Ok(payload) = rmp_serde::to_vec_named(&fallback) {
+                write_frame(writer, &payload)?;
+                writer.flush()
+            } else {
+                // Cannot serialize even the fallback — propagate the write error
+                Err(io::Error::other("Fatal serialization failure"))
+            }
+        }
+    }
+}
+
+fn send_chunk(writer: &mut impl Write, request_id: u64, data: rmpv::Value) -> io::Result<()> {
+    send_response(writer, request_id, true, data, None, Some(true))
+}
+
+fn send_final(writer: &mut impl Write, request_id: u64, data: rmpv::Value) -> io::Result<()> {
+    send_response(writer, request_id, true, data, None, Some(false))
+}
+
+fn send_error(writer: &mut impl Write, request_id: u64, error: String) -> io::Result<()> {
+    send_response(writer, request_id, false, rmpv::Value::Nil, Some(error), Some(false))
+}
+
 // ─── Command handlers ───
 
-fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, String> {
-    let file = File::open(path).map_err(|e| format!("Cannot open file: {}", e))?;
+fn cmd_open(state: &mut AppState, path: &str) -> Result<rmpv::Value, AppError> {
+    let file = File::open(path).map_err(|e| AppError::File(e.to_string()))?;
 
     let load_opts = LoadOptions {
         multi_thread: false,
@@ -148,20 +265,17 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, Strin
 
     let reader = BufReader::new(file);
     let header = read_header(reader, &load_opts)
-        .map_err(|e| format!("Failed to read header: {:?}", e))?;
+        .map_err(|e| AppError::Wellen(format!("Failed to read header: {:?}", e)))?;
 
     let hierarchy = header.hierarchy;
-    state.file_format = header.file_format;
     let body = header.body;
 
-    // Count scopes and vars
     let scope_count = hierarchy.all_scopes().count() as u32;
     let var_count = hierarchy.all_vars().count() as u32;
 
-    // Time scale
-    let (time_unit, time_scale) = match hierarchy.timescale() {
+    let time_unit = match hierarchy.timescale() {
         Some(scale) => {
-            let unit = match scale.unit {
+            match scale.unit {
                 TimescaleUnit::Seconds => "s",
                 TimescaleUnit::MilliSeconds => "ms",
                 TimescaleUnit::MicroSeconds => "us",
@@ -171,20 +285,17 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, Strin
                 TimescaleUnit::AttoSeconds => "as",
                 TimescaleUnit::ZeptoSeconds => "zs",
                 TimescaleUnit::Unknown => "s",
-            };
-            (unit.to_string(), scale.factor as u32)
+            }.to_string()
         }
-        None => ("ns".to_string(), 1),
+        None => "ns".to_string(),
     };
 
-    // Read body for time table and signal source
     let body_result = read_body(body, &hierarchy, None)
-        .map_err(|e| format!("Failed to read body: {:?}", e))?;
+        .map_err(|e| AppError::Wellen(format!("Failed to read body: {:?}", e)))?;
 
     let time_table = body_result.time_table;
     let mut signal_source = body_result.source;
 
-    // Load parameters
     let param_ids: Vec<SignalRef> = hierarchy.all_vars()
         .filter(|v| v.var_type() == wellen::VarType::Parameter)
         .map(|v| v.signal_ref())
@@ -208,7 +319,6 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, Strin
     let event_count = time_table.len();
     let time_end = if event_count > 0 { time_table[event_count - 1] } else { 0 };
 
-    // Top-level scopes
     let top_scopes: Vec<ScopeInfo> = hierarchy.scopes().map(|s| {
         let scope = hierarchy.index(s);
         ScopeInfo {
@@ -218,7 +328,6 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, Strin
         }
     }).collect();
 
-    // Top-level vars
     let top_vars: Vec<VarInfo> = hierarchy.vars().map(|v| {
         let var = hierarchy.index(v);
         let signal_ref = var.signal_ref();
@@ -247,55 +356,47 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<serde_json::Value, Strin
     state.signal_source = Some(signal_source);
     state.time_table = Some(time_table);
     state.time_unit = time_unit.clone();
-    state.time_scale = time_scale;
     state.time_end = time_end;
 
     let info = FileInfo {
-        format: format!("{:?}", state.file_format),
+        format: format!("{:?}", header.file_format),
         scope_count,
         var_count,
         time_unit,
-        time_scale,
         time_end,
         event_count,
         top_scopes,
         top_vars,
     };
 
-    serde_json::to_value(info).map_err(|e| format!("Serialize error: {}", e))
+    to_msgpack(&info)
 }
 
-fn cmd_get_children(state: &AppState, id: u32, start_index: u32) -> Result<serde_json::Value, String> {
-    let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
-    let scope_ref = ScopeRef::from_index(id as usize).ok_or("Invalid scope ID")?;
+fn cmd_get_children(state: &AppState, id: u32, start_index: u32) -> Result<rmpv::Value, AppError> {
+    let hierarchy = state.hierarchy.as_ref().ok_or(AppError::NoFile)?;
+    let scope_ref = ScopeRef::from_index(id as usize).ok_or(AppError::Illegal(id))?;
     let scope = hierarchy.index(scope_ref);
 
     let max_return = 65000usize;
-    let mut result_len = 0usize;
     let mut scopes_out = Vec::new();
     let mut vars_out = Vec::new();
     let mut idx = 0u32;
-    let mut total_scopes = 0u32;
-    let mut total_vars = 0u32;
 
-    for s in scope.scopes(&hierarchy) {
-        total_scopes += 1;
-        if idx < start_index || result_len > max_return { idx += 1; continue; }
+    for s in scope.scopes(hierarchy) {
+        if idx < start_index { idx += 1; continue; }
         idx += 1;
         let child = hierarchy.index(s);
         let info = ScopeInfo {
-            name: child.name(&hierarchy).to_string(),
+            name: child.name(hierarchy).to_string(),
             id: s.index() as u32,
             scope_type: format!("{:?}", child.scope_type()),
         };
-        let s = serde_json::to_string(&info).unwrap_or_default();
-        result_len += s.len();
         scopes_out.push(info);
+        if scopes_out.len() + vars_out.len() >= max_return { break; }
     }
 
-    for v in scope.vars(&hierarchy) {
-        total_vars += 1;
-        if idx < start_index || result_len > max_return { idx += 1; continue; }
+    for v in scope.vars(hierarchy) {
+        if idx < start_index { idx += 1; continue; }
         idx += 1;
         let var = hierarchy.index(v);
         let signal_ref = var.signal_ref();
@@ -304,28 +405,32 @@ fn cmd_get_children(state: &AppState, id: u32, start_index: u32) -> Result<serde
             Some(b) => (b.msb() as i32, b.lsb() as i32),
             None => (-1, -1),
         };
-        let enum_type = var.enum_type(&hierarchy).map(|e| e.0.to_string()).unwrap_or_default();
+        let enum_type = var.enum_type(hierarchy).map(|e| e.0.to_string()).unwrap_or_default();
         let param_value = state.param_table.as_ref()
             .and_then(|t| t.get(&(signal_ref.index() as u32)).cloned());
         let info = VarInfo {
-            name: var.name(&hierarchy).to_string(),
+            name: var.name(hierarchy).to_string(),
             netlist_id: v.index() as u32,
             signal_id: signal_ref.index() as u32,
             var_type: format!("{:?}", var.var_type()),
-            encoding: format!("{:?}", var.signal_encoding(&hierarchy)),
-            width: var.length(&hierarchy).unwrap_or(0),
+            encoding: format!("{:?}", var.signal_encoding(hierarchy)),
+            width: var.length(hierarchy).unwrap_or(0),
             msb, lsb,
             enum_type,
             param_value,
         };
-        let s = serde_json::to_string(&info).unwrap_or_default();
-        result_len += s.len();
         vars_out.push(info);
+        if scopes_out.len() + vars_out.len() >= max_return { break; }
     }
 
-    let total_items = total_scopes + total_vars;
     let returned = scopes_out.len() as u32 + vars_out.len() as u32;
-    let remaining = total_items as i32 - (returned as i32 + start_index as i32);
+    let remaining = (state.hierarchy.as_ref()
+        .and_then(|h| {
+            let sref = ScopeRef::from_index(id as usize)?;
+            let sc = h.index(sref);
+            let total = sc.scopes(h).count() + sc.vars(h).count();
+            Some(total as i32)
+        }).unwrap_or(0)) - returned as i32 - start_index as i32;
 
     let result = ChildrenResult {
         scopes: scopes_out,
@@ -334,71 +439,103 @@ fn cmd_get_children(state: &AppState, id: u32, start_index: u32) -> Result<serde
         remaining_items: remaining,
     };
 
-    serde_json::to_value(result).map_err(|e| format!("Serialize error: {}", e))
+    to_msgpack(&result)
 }
 
-fn cmd_get_signal_data(state: &mut AppState, signal_ids: &[u32]) -> Result<serde_json::Value, String> {
-    let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
-    let signal_source = state.signal_source.as_mut().ok_or("No signal source")?;
-    let time_table = state.time_table.as_ref().ok_or("No time table")?;
+fn cmd_get_signal_data(
+    state: &mut AppState,
+    signal_ids: &[u32],
+    time_start: Option<u64>,
+    time_end: Option<u64>,
+    writer: &mut impl Write,
+    request_id: u64,
+) -> io::Result<()> {
+    let hierarchy = state.hierarchy.as_ref()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No file loaded"))?;
+    let signal_source = state.signal_source.as_mut()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No signal source"))?;
+    let time_table = state.time_table.as_ref()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No time table"))?;
 
-    let mut signal_refs: Vec<SignalRef> = Vec::new();
-    for id in signal_ids {
-        let sr = SignalRef::from_index(*id as usize).ok_or("Invalid signal ID")?;
-        signal_refs.push(sr);
+    let start_idx = time_start
+        .map(|t| time_table.partition_point(|&x| x < t))
+        .unwrap_or(0);
+    let end_idx = time_end
+        .map(|t| time_table.partition_point(|&x| x <= t))
+        .unwrap_or(time_table.len());
+
+    let signal_refs: Vec<SignalRef> = signal_ids.iter()
+        .filter_map(|id| SignalRef::from_index(*id as usize))
+        .collect();
+
+    if signal_refs.is_empty() {
+        return send_final(writer, request_id, rmpv::Value::Nil);
     }
 
     let signals = signal_source.load_signals(&signal_refs, hierarchy, false);
+    let mut all_results: Vec<SignalDataResult> = Vec::new();
 
-    let mut results = Vec::new();
     for signal in &signals {
-        let sig_ref = signal.signal_ref();
-        let sig_id = sig_ref.index() as u32;
+        let sig_id = signal.signal_ref().index() as u32;
         let time_indices = signal.time_indices();
-        let transitions = signal.iter_changes();
+        let mut value_changes: Vec<(u64, String)> = Vec::new();
+        let mut initial_val: Option<String> = None;
 
-        let mut value_changes: Vec<[String; 2]> = Vec::new();
-        let mut min = 0.0f64;
-        let mut max = 0.0f64;
-
-        for (i, (_, value)) in transitions.enumerate() {
-            let t = if i < time_indices.len() {
-                time_table[time_indices[i] as usize]
-            } else {
-                0
-            };
-            let v = value.to_string();
-
-            if let wellen::SignalValueRef::Real(r) = value {
-                if i == 0 { min = r; max = r; }
-                else { min = min.min(r); max = max.max(r); }
+        for (i, (_tidx, value)) in signal.iter_changes().enumerate() {
+            let time_idx = if i < time_indices.len() { time_indices[i] as usize } else { 0 };
+            if time_idx < start_idx {
+                initial_val = Some(value.to_string());
+                continue;
             }
+            if time_idx >= end_idx { break; }
 
-            value_changes.push([t.to_string(), v]);
+            let Some(&t) = time_table.get(time_idx) else { continue };
+            value_changes.push((t, value.to_string()));
         }
 
-        results.push(SignalDataResult {
+        if initial_val.is_none() {
+            if let Some(ts) = time_start {
+                if let Some(&first_tidx) = time_indices.first() {
+                    if let Some(&first_time) = time_table.get(first_tidx as usize) {
+                        if first_time > ts {
+                            initial_val = Some("x".to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let prepend = time_start.zip(initial_val);
+        let value_changes: Vec<(u64, String)> = prepend
+            .into_iter()
+            .chain(value_changes)
+            .collect();
+
+        all_results.push(SignalDataResult {
             signal_id: sig_id,
             value_changes,
-            min,
-            max,
         });
     }
 
-    serde_json::to_value(results).map_err(|e| format!("Serialize error: {}", e))
+    let chunk_size = 10;
+    for chunk in all_results.chunks(chunk_size) {
+        send_chunk(writer, request_id, to_value_or_nil(&chunk.to_vec()))?;
+    }
+    send_final(writer, request_id, rmpv::Value::Nil)
 }
 
-fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json::Value, String> {
-    let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
+fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<rmpv::Value, AppError> {
+    let hierarchy = state.hierarchy.as_ref().ok_or(AppError::NoFile)?;
 
     if query.is_empty() {
-        return serde_json::to_value(SearchResult {
+        return to_msgpack(&SearchResult {
             total_results: 0,
             search_results: vec![],
-        }).map_err(|e| format!("Serialize error: {}", e));
+        });
     }
 
     let lower_query = query.to_lowercase();
+    let mut results = Vec::new();
 
     let search_scope = if scope_id != 0xFFFFFFFF {
         ScopeRef::from_index(scope_id as usize).map(|sr| hierarchy.index(sr))
@@ -406,9 +543,6 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
         None
     };
 
-    let mut results = Vec::new();
-
-    // Search scopes
     let all_scopes: Vec<_> = match search_scope {
         Some(s) => {
             let mut v = vec![s];
@@ -435,7 +569,30 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
         }
     }
 
-    for var in hierarchy.all_vars() {
+    fn scope_var_pairs<'a>(
+        hierarchy: &'a Hierarchy,
+        scope: &Scope,
+        pairs: &mut Vec<(wellen::VarRef, &'a wellen::Var)>,
+    ) {
+        for vref in scope.vars(hierarchy) {
+            pairs.push((vref, hierarchy.index(vref)));
+        }
+        for sref in scope.scopes(hierarchy) {
+            scope_var_pairs(hierarchy, hierarchy.index(sref), pairs);
+        }
+    }
+
+    let mut var_pairs: Vec<(wellen::VarRef, &wellen::Var)> = Vec::new();
+    match search_scope {
+        Some(scope) => scope_var_pairs(hierarchy, scope, &mut var_pairs),
+        None => {
+            for sref in hierarchy.scopes() {
+                scope_var_pairs(hierarchy, hierarchy.index(sref), &mut var_pairs);
+            }
+        }
+    }
+
+    for (vref, var) in &var_pairs {
         let name = var.name(hierarchy).to_string().to_lowercase();
         if name.contains(&lower_query) {
             let param_value = state.param_table.as_ref()
@@ -456,7 +613,7 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
                 param_value,
                 msb,
                 lsb,
-                netlist_id: sig_ref.index() as u32,
+                netlist_id: vref.index() as u32,
                 signal_id: sig_ref.index() as u32,
                 width: w,
             });
@@ -471,49 +628,7 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<serde_json
         search_results: results,
     };
 
-    serde_json::to_value(result).map_err(|e| format!("Serialize error: {}", e))
-}
-
-fn cmd_get_values_at_time(state: &AppState, paths: &[String]) -> Result<serde_json::Value, String> {
-    let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
-
-    let mut signal_refs = Vec::new();
-    let mut path_map: Vec<(String, SignalRef)> = Vec::new();
-
-    for path in paths {
-        let parts: Vec<&str> = path.split('.').collect();
-        let name = parts.last().unwrap_or(&"");
-        let scope_path = &parts[..parts.len().saturating_sub(1)];
-        if let Some(var_ref) = hierarchy.lookup_var(scope_path, name) {
-            let var = hierarchy.index(var_ref);
-            let sr = var.signal_ref();
-            signal_refs.push(sr);
-            path_map.push((path.clone(), sr));
-        }
-    }
-
-    // We need a mutable signal source, but the API requires it
-    // For now, return empty
-    let result: Vec<ValuesAtTimeResult> = Vec::new();
-    serde_json::to_value(result).map_err(|e| format!("Serialize error: {}", e))
-}
-
-fn cmd_get_enum_data(state: &AppState, netlist_ids: &[u32]) -> Result<serde_json::Value, String> {
-    let hierarchy = state.hierarchy.as_ref().ok_or("No file loaded")?;
-    let mut enum_map = serde_json::Map::new();
-
-    for id in netlist_ids {
-        if let Some(var_ref) = VarRef::from_index(*id as usize) {
-            let var = hierarchy.index(var_ref);
-            if let Some((name, values)) = var.enum_type(&hierarchy) {
-                if let Ok(val) = serde_json::to_value(&values) {
-                    enum_map.insert(name.to_string(), val);
-                }
-            }
-        }
-    }
-
-    Ok(serde_json::Value::Object(enum_map))
+    to_msgpack(&result)
 }
 
 // ─── Main loop ───
@@ -523,84 +638,194 @@ fn main() {
     let stdout = io::stdout();
     let mut state = AppState::new();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
 
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let req: Request = match serde_json::from_str(&line) {
-            Ok(r) => r,
+    loop {
+        let buf = match read_frame(&mut reader) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
-                let resp = Response {
-                    request_id: 0,
-                    success: false,
-                    data: serde_json::Value::Null,
-                    error: Some(format!("Parse error: {}", e)),
-                };
-                let out = serde_json::to_string(&resp).unwrap();
-                let mut handle = stdout.lock();
-                let _ = writeln!(handle, "{}", out);
-                let _ = handle.flush();
+                let _ = send_error(&mut writer, 0, format!("Read error: {}", e));
                 continue;
             }
         };
 
-        let result = match req.cmd.as_str() {
-            "open" => {
-                match &req.file {
-                    Some(f) => cmd_open(&mut state, f),
-                    None => Err("Missing 'file' argument".to_string()),
-                }
+        let req: Request = match rmp_serde::from_slice(&buf) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = send_error(&mut writer, 0, format!("Parse error: {}", e));
+                continue;
             }
-            "get_children" => {
-                cmd_get_children(&state, req.id.unwrap_or(0), req.start_index.unwrap_or(0))
-            }
-            "get_signal_data" => {
-                match &req.signal_ids {
-                    Some(ids) => cmd_get_signal_data(&mut state, ids),
-                    None => Err("Missing 'signal_ids' argument".to_string()),
-                }
-            }
-            "search" => {
-                cmd_search(&state, req.search_query.as_deref().unwrap_or(""), req.scope_id.unwrap_or(0xFFFFFFFF))
-            }
-            "get_values_at_time" => {
-                cmd_get_values_at_time(&state, req.paths.as_deref().unwrap_or(&[]))
-            }
-            "get_enum_data" => {
-                cmd_get_enum_data(&state, req.netlist_ids.as_deref().unwrap_or(&[]))
-            }
-            "close" => {
-                state = AppState::new();
-                Ok(serde_json::Value::Null)
-            }
-            _ => Err(format!("Unknown command: {}", req.cmd)),
         };
 
         let request_id = req.request_id.unwrap_or(0);
-        let resp = match result {
-            Ok(data) => Response {
-                request_id,
-                success: true,
-                data,
-                error: None,
-            },
-            Err(e) => Response {
-                request_id,
-                success: false,
-                data: serde_json::Value::Null,
-                error: Some(e),
-            },
-        };
 
-        let out = serde_json::to_string(&resp).unwrap();
-        let mut handle = stdout.lock();
-        let _ = writeln!(handle, "{}", out);
-        let _ = handle.flush();
+        match req.cmd.as_str() {
+            "get_signal_data" => {
+                let ids = req.signal_ids.unwrap_or_default();
+                if let Err(_e) = cmd_get_signal_data(&mut state, &ids, req.time_start, req.time_end,
+                    &mut writer, request_id)
+                {
+                    break;
+                }
+            }
+            "open" => {
+                let _ = match &req.file {
+                    Some(f) => match cmd_open(&mut state, f) {
+                        Ok(data) => send_final(&mut writer, request_id, data),
+                        Err(e) => send_error(&mut writer, request_id, e.to_string()),
+                    },
+                    None => send_error(&mut writer, request_id, "Missing 'file' argument".to_string()),
+                };
+            }
+            "get_children" => {
+                let _ = match cmd_get_children(&state, req.id.unwrap_or(0), req.start_index.unwrap_or(0)) {
+                    Ok(data) => send_final(&mut writer, request_id, data),
+                    Err(e) => send_error(&mut writer, request_id, e.to_string()),
+                };
+            }
+            "search" => {
+                let _ = match cmd_search(&state, req.search_query.as_deref().unwrap_or(""), req.scope_id.unwrap_or(0xFFFFFFFF)) {
+                    Ok(data) => send_final(&mut writer, request_id, data),
+                    Err(e) => send_error(&mut writer, request_id, e.to_string()),
+                };
+            }
+            "close" => {
+                state = AppState::new();
+                let _ = send_final(&mut writer, request_id, rmpv::Value::Nil);
+            }
+            cmd => {
+                let _ = send_error(&mut writer, request_id, format!("Unknown command: {}", cmd));
+            }
+        }
+    }
+}
+
+// ─── Tests ───
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_frame_roundtrip() {
+        let payload = b"hello msgpack";
+        let mut buf = Vec::new();
+        write_frame(&mut buf, payload).unwrap();
+        let mut cursor = Cursor::new(&buf);
+        let result = read_frame(&mut cursor).unwrap();
+        assert_eq!(result, payload);
+    }
+
+    #[test]
+    fn test_frame_empty() {
+        let payload = b"";
+        let mut buf = Vec::new();
+        write_frame(&mut buf, payload).unwrap();
+        let mut cursor = Cursor::new(&buf);
+        let result = read_frame(&mut cursor).unwrap();
+        assert_eq!(result, payload);
+    }
+
+    #[test]
+    fn test_frame_large() {
+        let payload = vec![0xABu8; 10000];
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &payload).unwrap();
+        let mut cursor = Cursor::new(&buf);
+        let result = read_frame(&mut cursor).unwrap();
+        assert_eq!(result, payload);
+    }
+
+    #[test]
+    fn test_app_error_display() {
+        assert_eq!(AppError::NoFile.to_string(), "No file loaded");
+        assert_eq!(AppError::Illegal(42).to_string(), "Invalid scope ID: 42");
+        assert_eq!(AppError::Serialize("bad".to_string()).to_string(), "Serialize error: bad");
+        assert!(AppError::Io(io::Error::new(io::ErrorKind::NotFound, "x")).to_string().contains("I/O error"));
+    }
+
+    #[test]
+    fn test_send_response_roundtrip() {
+        let mut buf = Vec::new();
+        let data = rmpv::ext::to_value(&"test_value").unwrap();
+        let _ = send_response(&mut buf, 1, true, data, None, Some(false));
+
+        let mut cursor = Cursor::new(&buf);
+        let frame = read_frame(&mut cursor).unwrap();
+        let resp: Response = rmp_serde::from_slice(&frame).unwrap();
+        assert_eq!(resp.request_id, 1);
+        assert!(resp.success);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.chunk, Some(false));
+    }
+
+    #[test]
+    fn test_send_error_response() {
+        let mut buf = Vec::new();
+        let _ = send_error(&mut buf, 5, "Something went wrong".to_string());
+
+        let mut cursor = Cursor::new(&buf);
+        let frame = read_frame(&mut cursor).unwrap();
+        let resp: Response = rmp_serde::from_slice(&frame).unwrap();
+        assert_eq!(resp.request_id, 5);
+        assert!(!resp.success);
+        assert_eq!(resp.error, Some("Something went wrong".to_string()));
+        assert_eq!(resp.chunk, Some(false));
+    }
+
+    #[test]
+    fn test_to_value_or_nil_with_serializable() {
+        let val = to_value_or_nil(&42u32);
+        assert_eq!(val, rmpv::Value::Integer(42.into()));
+    }
+
+    #[test]
+    fn test_search_empty_query() {
+        let state = AppState::new();
+        let result = cmd_search(&state, "", 0xFFFFFFFF);
+        assert!(result.is_err()); // No file loaded
+    }
+
+    #[test]
+    fn test_children_no_file() {
+        let state = AppState::new();
+        let result = cmd_get_children(&state, 1, 0);
+        match result {
+            Err(AppError::NoFile) => {}
+            _ => panic!("Expected NoFile error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_open_nonexistent_file() {
+        let mut state = AppState::new();
+        let result = cmd_open(&mut state, "/nonexistent/foo.vcd");
+        match result {
+            Err(AppError::File(_)) => {}
+            _ => panic!("Expected File error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_request_deserialize() {
+        let req = Request {
+            cmd: "open".to_string(),
+            request_id: Some(1),
+            file: Some("test.vcd".to_string()),
+            id: None,
+            signal_ids: None,
+            search_query: None,
+            scope_id: None,
+            start_index: None,
+            time_start: None,
+            time_end: None,
+        };
+        let encoded = rmp_serde::to_vec_named(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.cmd, "open");
+        assert_eq!(decoded.file, Some("test.vcd".to_string()));
     }
 }

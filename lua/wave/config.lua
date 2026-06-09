@@ -1,31 +1,46 @@
+---@class WaveColors
+---@field signal string|nil
+---@field cursor string|nil
+---@field label string|nil
+---@field signal_hl string|nil
+---@field cursor_hl string|nil
+---@field label_hl string|nil
+
+---@class WaveConfig
+---@field parser_binary string
+---@field colors WaveColors
+---@field keymaps table<string, string>
+
 local M = {}
 
+---@type WaveConfig
 M.defaults = {
   parser_binary = vim.fn.stdpath("data") .. "/wave/wave",
-  keymaps = {
-    toggle_viewer = "<leader>wv",
-    toggle_netlist = "<leader>wn",
-    add_signal = "<leader>wa",
-    remove_signal = "<leader>wd",
-    zoom_in = "<C-=>",
-    zoom_out = "<C-->",
-    zoom_fit = "<C-0>",
-    scroll_left = "<Left>",
-    scroll_right = "<Right>",
-    marker_prev_edge = "<S-Left>",
-    marker_next_edge = "<S-Right>",
-    search_netlist = "<leader>wf",
-  },
   colors = {
     signal = "#98c379",
     cursor = nil,
     label = "#5c6370",
-    -- or set *_hl to read from a highlight group (e.g. signal_hl = "Type")
+  },
+  keymaps = {
+    close = "q",
+    scroll_left = "h",
+    scroll_right = "l",
+    zoom_in = "i",
+    zoom_out = "o",
+    fit = "0",
+    prev_edge = "H",
+    next_edge = "L",
+    cursor = "<Space>",
+    add = "a",
+    del = "d",
+    expand = "<CR>",
   },
 }
 
+---@type WaveConfig
 M.options = {}
 
+---@param opts WaveConfig|nil
 function M.setup(opts)
   M.options = vim.tbl_deep_extend("keep", opts or {}, M.defaults)
 end

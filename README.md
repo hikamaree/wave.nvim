@@ -1,6 +1,6 @@
 # wave.nvim
 
-Waveform viewer for Neovim
+Waveform viewer for Neovim.
 
 <img src="screenshot.png" alt="screenshot" width="800">
 
@@ -33,25 +33,24 @@ To build from source instead, see [Building](#building).
 
 ```lua
 require("wave").setup({
-  parser_binary = vim.fn.stdpath("data") .. "/wave/wave", -- default
+  parser_binary = vim.fn.stdpath("data") .. "/wave/wave",
   colors = {
-    signal_hl = "String",
-    cursor_hl = "Cursor",
-    label_hl = "Comment",
+    signal = "#98c379",
+    label  = "#5c6370",
   },
   keymaps = {
-    toggle_viewer   = "<leader>wv",
-    toggle_netlist  = "<leader>wn",
-    add_signal      = "<leader>wa",
-    remove_signal   = "<leader>wd",
-    search_netlist  = "<leader>wf",
-    zoom_in         = "<C-=>",
-    zoom_out        = "<C-->",
-    zoom_fit        = "<C-0>",
-    scroll_left     = "<Left>",
-    scroll_right    = "<Right>",
-    marker_prev_edge = "<S-Left>",
-    marker_next_edge = "<S-Right>",
+    close       = "q",
+    scroll_left = "h",
+    scroll_right = "l",
+    zoom_in     = "i",
+    zoom_out    = "o",
+    fit         = "0",
+    prev_edge   = "H",
+    next_edge   = "L",
+    cursor      = "<Space>",
+    add         = "a",
+    del         = "d",
+    expand      = "<CR>",
   },
 })
 ```
@@ -66,7 +65,21 @@ require("wave").setup({
 | `:WaveSearch` | Search netlist signals |
 | `:WaveClose` | Close all wave windows |
 
-VCD/FST/GHW files also open automatically via `BufReadCmd`.
+### Default keymaps (inside viewer buffer)
+
+| Key | Action |
+|-----|--------|
+| `q` | Close viewer |
+| `h` / `l` | Scroll left / right |
+| `i` / `o` | Zoom in / out |
+| `0` | Zoom to fit |
+| `H` / `L` | Previous / next edge |
+| `<Space>` | Set cursor at center |
+| `a` | Add signal by name |
+| `d` | Remove signal at cursor |
+| `<CR>` | Expand multi-bit signal |
+
+These are customizable via `setup({ keymaps = { ... } })`. Unset keys fall back to defaults.
 
 ## Building
 
