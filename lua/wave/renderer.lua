@@ -64,63 +64,12 @@ local function _build_col_val(value_changes, time_start, time_end, width, col_vc
   return col_val
 end
 
-local function is_high_freq(col_val, width, value_changes, time_start, time_range)
-  local trans = 0
-  for col = 0, width - 2 do
-    if (col_val[col] == "1") ~= (col_val[col + 1] == "1") then trans = trans + 1 end
-  end
-  if trans > 0 and (width / trans) < 3 then return true end
-  local total = 0
-  local time_end = time_start + time_range
-  for _, vc in ipairs(value_changes) do
-    local t = tonumber(vc[1])
-    if t >= time_start and t <= time_end then
-      total = total + 1
-    end
-  end
-  return total > width
-end
-
-local function render_high_freq(width)
-  local top = {}
-  local bot = {}
-  for c = 1, width do top[c] = "┬"; bot[c] = "┴" end
-  return table.concat(top), table.concat(bot)
-end
-
-local function render_low_freq(col_val, width)
-  local top = {}
-  local bot = {}
-  for c = 1, width do top[c] = " "; bot[c] = " " end
-
-  local function bit(v) return v == "1" end
-
+local function _col_vc_counts(col_vc_end, width)
+  local counts = {}
   for col = 0, width - 1 do
-    local v, nv = col_val[col], col_val[col + 1]
-    local vb, nb = bit(v), bit(nv)
-    if vb ~= nb then
-      if nb then
-        top[col + 1] = "┌"
-        if col > 0 then
-          local bc = bot[col]
-          if bc ~= "┘" and bc ~= "└" then bot[col] = "─" end
-        end
-        bot[col + 1] = "┘"
-      else
-        if col > 0 then
-          local tc = top[col]
-          if tc ~= "┌" and tc ~= "┐" then top[col] = "─" end
-        end
-        top[col + 1] = "┐"
-        bot[col + 1] = "└"
-      end
-    elseif vb then
-      top[col + 1] = "─"
-    else
-      bot[col + 1] = "─"
-    end
+    counts[col] = col_vc_end[col + 1] - col_vc_end[col]
   end
-  return table.concat(top), table.concat(bot)
+  return counts
 end
 
 function M.render_single_bit(value_changes, time_start, time_end, width)
@@ -128,12 +77,63 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
     return string.rep(" ", width), string.rep(" ", width)
   end
 
-  local col_val = _build_col_val(value_changes, time_start, time_end, width)
+  local col_vc_end = {}
+  local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
+  local col_tc = _col_vc_counts(col_vc_end, width)
 
-  if is_high_freq(col_val, width, value_changes, time_start, time_end - time_start) then
-    return render_high_freq(width)
+  -- If a VC falls exactly at time_start, shift col_val[0] to the value before it
+  -- so the transition at the left edge is visible (counted in tc[0]).
+  if col_vc_end[0] > 1 then
+    local first_vc_time = tonumber(value_changes[col_vc_end[0]][1])
+    if first_vc_time and math.abs(first_vc_time - time_start) <= EPS then
+      col_val[0] = value_changes[col_vc_end[0] - 1][2]
+      col_vc_end[0] = col_vc_end[0] - 1
+      col_tc[0] = col_vc_end[1] - col_vc_end[0]
+    end
   end
-  return render_low_freq(col_val, width)
+
+  local top = {}
+  local bot = {}
+  for c = 1, width do top[c] = " "; bot[c] = " " end
+
+  for col = 0, width - 1 do
+    local c = col + 1
+    local v, nv = col_val[col], col_val[col + 1]
+    local tc = col_tc[col]
+
+    if tc == 0 then
+      if v == "1" then
+        top[c] = "─"
+      else
+        bot[c] = "─"
+      end
+
+    elseif tc == 1 then
+      if v == "0" then
+        top[c] = "┌"
+        bot[c] = "┘"
+      else
+        top[c] = "┐"
+        bot[c] = "└"
+      end
+
+    else -- tc >= 2
+      local prev_clean = (col == 0) or (col_tc[col - 1] <= 1)
+      local next_clean = (col == width - 1) or (col_tc[col + 1] <= 1)
+      if next_clean then
+        if v == "0" then top[c] = "┐"; bot[c] = "┴"
+        else top[c] = "┬"; bot[c] = "┘" end
+      elseif prev_clean then
+        if v == "0" then top[c] = "┌"; bot[c] = "┘"
+        else top[c] = "┐"; bot[c] = "└" end
+      else
+        top[c] = "┬"
+        bot[c] = "┴"
+      end
+    end
+  end
+
+  return table.concat(top), table.concat(bot)
 end
 
 function M.render_multi_bit(value_changes, time_start, time_end, width)
