@@ -9,6 +9,11 @@ local LABEL_GAP = 3
 local MIN_WAVEFORM_WIDTH = 20
 local FIRST_SIGNAL_LINE = 5
 local SHRINK_THRESHOLD = 0.5
+local BOTTOM_BAR_LINES = 2
+local CURSOR_SKIP_LINES = 2  -- header (1) + ruler numbers (1)
+local MAX_EXPANDED_ROWS = 1000
+local MAX_LABEL_RATIO = 0.3
+local LABEL_LEAD_SPACE = 1
 
 local HELP_GROUPS = {
   { "close" },
@@ -271,7 +276,7 @@ function M.add_signal(netlist_id, signal_id, name, width)
   }, function(resp)
     if resp.success and resp.data and #resp.data > 0 then
       local data = resp.data[1]
-      signals.set_value_changes(netlist_id, data.value_changes)
+      signals.set_value_changes(signal_id, data.value_changes)
       if M.is_open() then
         st = _get_state()
         if st and st.time_end == st.file_time_end then
@@ -324,11 +329,17 @@ function M.add_signal_prompt()
 end
 
 ---@return number|nil
+local _period_cache = { period = nil, signal_count = 0 }
+
 function M._detect_period()
+  local all_signals = signals.get_all()
+  if _period_cache.period ~= nil and _period_cache.signal_count == #all_signals then
+    return _period_cache.period
+  end
   local min_gap = math.huge
   ---@type number|nil
   local min_period = math.huge
-  for _, sig in ipairs(signals.get_all()) do
+  for _, sig in ipairs(all_signals) do
     if sig.width == 1 and sig.value_changes and #sig.value_changes >= 3 then
       local last_rise, last_fall
       for i = 1, #sig.value_changes - 1 do
@@ -355,6 +366,7 @@ function M._detect_period()
       end
     end
   end
+  _period_cache.period = nil
   if min_period == math.huge then
     if min_gap ~= math.huge then
       min_period = min_gap * 2
@@ -362,6 +374,8 @@ function M._detect_period()
       min_period = nil
     end
   end
+  _period_cache.period = min_period
+  _period_cache.signal_count = #all_signals
   return min_period
 end
 
@@ -393,9 +407,11 @@ end
 
 ---@param sig DisplayedSignal
 ---@return number
+--- Returns the number of buffer lines occupied by a signal:
+--   non-expanded: 3 (top, bot, gap), expanded: 3 + value rows.
 local function _signal_block(sig)
   if sig.expanded and sig.value_changes then
-    return 3 + #sig.value_changes
+    return 3 + math.min(#sig.value_changes, MAX_EXPANDED_ROWS)
   end
   return 3
 end
@@ -421,7 +437,7 @@ function M.remove_signal_at_cursor()
   local cursor = vim.api.nvim_win_get_cursor(st.win)
   local sig, cur = _signal_at_line(cursor[1])
   if sig and cursor[1] >= cur and cursor[1] < cur + 2 then
-    signals.remove_signal(sig.netlist_id)
+    signals.remove_signal(sig.signal_id)
     M._render()
   end
 end
@@ -566,11 +582,44 @@ function M.set_cursor_at_view()
   M._render()
 end
 
+---@param edges number[]
+---@param t number
+---@return number|nil
+local function _edge_prev(edges, t)
+  local lo, hi = 1, #edges
+  while lo <= hi do
+    local mid = math.floor((lo + hi) / 2)
+    if edges[mid] < t then lo = mid + 1 else hi = mid - 1 end
+  end
+  return edges[hi]
+end
+
+---@param edges number[]
+---@param t number
+---@return number|nil
+local function _edge_next(edges, t)
+  local lo, hi = 1, #edges
+  while lo <= hi do
+    local mid = math.floor((lo + hi) / 2)
+    if edges[mid] > t then hi = mid - 1 else lo = mid + 1 end
+  end
+  return edges[lo]
+end
+
 ---@param cursor_time number
 ---@param less_than boolean
 ---@param default number
 ---@return number
 local function _find_edge(cursor_time, less_than, default)
+  local edges = signals.get_edges()
+  if #edges > 0 then
+    if less_than then
+      return _edge_prev(edges, cursor_time) or default
+    else
+      return _edge_next(edges, cursor_time) or default
+    end
+  end
+  -- Fallback: scan all signals (edge cap exceeded)
   local all_signals = signals.get_all()
   local nearest = default
   for _, sig in ipairs(all_signals) do
@@ -669,7 +718,7 @@ local function _signal_label(sig, lw)
   end
   if sig.expanded then label = label .. " ▼" end
   if #label > lw then
-    return label:sub(1, lw)
+    return label:sub(1, lw - 1) .. "…"
   end
   return label .. string.rep(" ", lw - #label)
 end
@@ -706,7 +755,7 @@ end
 ---@param top_str string
 ---@param bot_str string
 local function _add_signal_hlmarks(hlmarks, top_ndx, bot_ndx, lw, top_str, bot_str)
-  table.insert(hlmarks, { top_ndx, 1, 1 + lw, "WaveLabel" })
+  table.insert(hlmarks, { top_ndx, LABEL_LEAD_SPACE, LABEL_LEAD_SPACE + lw, "WaveLabel" })
   if #top_str > 0 then
     table.insert(hlmarks, { top_ndx, lw + 1, lw + 1 + #top_str, "WaveSignal" })
   end
@@ -734,8 +783,8 @@ local function _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
     local top_ndx = #lines
     local bot_ndx = #lines + 1
 
-    table.insert(lines, " " .. label .. top_str)
-    table.insert(lines, " " .. string.rep(" ", lw) .. bot_str)
+    table.insert(lines, string.rep(" ", LABEL_LEAD_SPACE) .. label .. top_str)
+    table.insert(lines, string.rep(" ", LABEL_LEAD_SPACE) .. string.rep(" ", lw) .. bot_str)
     _add_signal_hlmarks(hlmarks, top_ndx, bot_ndx, lw, top_str, bot_str)
 
     if is_multi and sig.expanded then
@@ -745,7 +794,7 @@ local function _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
       end
     end
 
-    table.insert(lines, string.rep(" ", 1 + lw + ww))
+    table.insert(lines, string.rep(" ", LABEL_LEAD_SPACE + lw + ww))
   end
 end
 
@@ -753,7 +802,7 @@ end
 ---@param lw number
 ---@param ww number
 local function _add_bottom_bar(lines, lw, ww)
-  table.insert(lines, string.rep(" ", 1 + lw + ww))
+  table.insert(lines, string.rep(" ", LABEL_LEAD_SPACE + lw + ww))
   local km = config.options.keymaps
   local group_parts = {}
   for _, group in ipairs(HELP_GROUPS) do
@@ -777,9 +826,14 @@ local function _write_buffer(buf, lines)
   for _, line in ipairs(lines) do
     if #line > min_width then min_width = #line end
   end
+  if min_width == 0 then
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    return
+  end
   for i = 1, #lines do
-    if #lines[i] < min_width then
-      lines[i] = lines[i] .. string.rep(" ", min_width - #lines[i])
+    local pad = min_width - #lines[i]
+    if pad > 0 then
+      lines[i] = lines[i] .. string.rep(" ", pad)
     end
   end
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -797,7 +851,7 @@ local function _apply_extmarks(buf, hlmarks, lines, cursor_col, lw)
   end
   if not cursor_col then return end
   local abs_col = cursor_col + lw + 1
-  for i = 3, #lines - 2 do
+  for i = 1 + CURSOR_SKIP_LINES, #lines - BOTTOM_BAR_LINES do
     local prefix = vim.fn.strcharpart(lines[i], 0, abs_col)
     vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, #prefix, {
       virt_text = { { "┃", "WaveCursor" } },
@@ -816,21 +870,28 @@ function M._render()
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_clear_namespace(buf, renderer.get_ns(), 0, -1)
 
-  local lw = st.label_width
-  local ww = math.max(vim.api.nvim_win_get_width(st.win) - lw - LABEL_GAP, MIN_WAVEFORM_WIDTH)
-  local all_signals = signals.get_all()
+  local ok = pcall(function()
+    local ww_total = vim.api.nvim_win_get_width(st.win)
+    st.label_width = math.max(15, math.min(40, math.floor(ww_total * MAX_LABEL_RATIO)))
+    local lw = st.label_width
+    local ww = math.max(ww_total - lw - LABEL_GAP, MIN_WAVEFORM_WIDTH)
+    local all_signals = signals.get_all()
 
-  local lines = {}
-  local hlmarks = {}
-  local cursor_col = _cursor_col(st, ww)
+    local lines = {}
+    local hlmarks = {}
+    local cursor_col = _cursor_col(st, ww)
 
-  table.insert(lines, _build_header(st))
-  _add_ruler_rows(lines, st, ww, all_signals)
-  _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
-  _add_bottom_bar(lines, lw, ww)
-  _write_buffer(buf, lines)
-  _apply_extmarks(buf, hlmarks, lines, cursor_col, lw)
+    table.insert(lines, _build_header(st))
+    _add_ruler_rows(lines, st, ww, all_signals)
+    _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
+    _add_bottom_bar(lines, lw, ww)
+    _write_buffer(buf, lines)
+    _apply_extmarks(buf, hlmarks, lines, cursor_col, lw)
+  end)
   vim.bo[buf].modifiable = false
+  if not ok then
+    vim.notify("[wave] Render error", vim.log.levels.ERROR)
+  end
 end
 
 return M

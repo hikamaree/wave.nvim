@@ -162,6 +162,21 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
   return table.concat(top), table.concat(bot)
 end
 
+---@param top string[]
+---@param bot string[]
+---@param v string
+---@param start_col number
+---@param end_col number
+local function _place_initial(top, bot, v, start_col, end_col)
+  top[start_col] = "┌"; bot[start_col] = "└"
+  local vlen = math.min(#v, end_col - start_col)
+  for c = 1, end_col - start_col do
+    local idx = start_col + c
+    if c <= vlen then top[idx] = v:sub(c, c) else top[idx] = "─" end
+    bot[idx] = "─"
+  end
+end
+
 ---@param value_changes table|nil
 ---@param time_start number
 ---@param time_end number
@@ -172,40 +187,32 @@ function M.render_multi_bit(value_changes, time_start, time_end, width)
     return string.rep(" ", width), string.rep(" ", width)
   end
   local col_val = _build_col_val(value_changes, time_start, time_end, width)
+  local col_val_fmt = {}
+  for col = 0, width do col_val_fmt[col] = fmt_val(col_val[col]) end
   local top = {}
   local bot = {}
   for i = 1, width do top[i] = " "; bot[i] = " " end
 
   local trans = {}
   for col = 0, width - 1 do
-    if fmt_val(col_val[col + 1]) ~= fmt_val(col_val[col]) then
+    if col_val_fmt[col + 1] ~= col_val_fmt[col] then
       table.insert(trans, col)
     end
   end
 
-  local function _place_initial(v, start_col, end_col)
-    top[start_col] = "┌"; bot[start_col] = "└"
-    local vlen = math.min(#v, end_col - start_col)
-    for c = 1, end_col - start_col do
-      local idx = start_col + c
-      if c <= vlen then top[idx] = v:sub(c, c) else top[idx] = "─" end
-      bot[idx] = "─"
-    end
-  end
-
   if #trans == 0 then
-    _place_initial(fmt_val(col_val[0]), 1, width)
+    _place_initial(top, bot, col_val_fmt[0], 1, width)
     return table.concat(top), table.concat(bot)
   end
 
   if trans[1] > 0 then
-    _place_initial(fmt_val(col_val[0]), 1, trans[1])
+    _place_initial(top, bot, col_val_fmt[0], 1, trans[1])
   end
 
   for ti, col in ipairs(trans) do
     top[col + 1] = "┬"
     bot[col + 1] = "┴"
-    local v = fmt_val(col_val[col + 1])
+    local v = col_val_fmt[col + 1]
     local next_col = trans[ti + 1] or width
     local space = next_col - col - 1
     local vlen = math.min(#v, space)
@@ -253,6 +260,20 @@ local function _find_first_rise_time(value_changes, from_idx, to_idx)
   return nil
 end
 
+---@param nums string[]
+---@param ticks string[]
+---@param col number
+---@param edge_time number
+---@param width number
+local function _ruler_place(nums, ticks, col, edge_time, width)
+  ticks[col + 1] = "┃"
+  local s = tostring(math.floor(edge_time))
+  for j = 0, #s - 1 do
+    local c = col + 1 + j
+    if c <= width then nums[c] = s:sub(j + 1, j + 1) end
+  end
+end
+
 ---@param time_start number
 ---@param time_end number
 ---@param width number
@@ -277,30 +298,19 @@ function M.render_ruler(time_start, time_end, width, value_changes)
 
     ticks[1] = "┃"
 
-    ---@param col number
-    ---@param edge_time number
-    local function _place(col, edge_time)
-      ticks[col + 1] = "┃"
-      local s = tostring(math.floor(edge_time))
-      for j = 0, #s - 1 do
-        local c = col + 1 + j
-        if c <= width then nums[c] = s:sub(j + 1, j + 1) end
-      end
-    end
-
     if #rise_cols >= 2 then
       local target = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
       local step = math.ceil(#rise_cols / target)
       for idx = 1, #rise_cols, step do
         local col = rise_cols[idx]
         local edge_time = _find_first_rise_time(value_changes, col_vc_end[col], col_vc_end[col + 1])
-        _place(col, edge_time or (time_start + (col + 1) * (time_range / width)))
+        _ruler_place(nums, ticks, col, edge_time or (time_start + (col + 1) * (time_range / width)), width)
       end
     else
       local n = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
       local step = math.floor(width / n)
       for col = step, width - 1, step do
-        _place(col, time_start + col * (time_range / width))
+        _ruler_place(nums, ticks, col, time_start + col * (time_range / width), width)
       end
     end
   end

@@ -13,7 +13,8 @@ function Parser.new(_self, binary_path)
   local tbl = {
     binary_path = binary_path,
     stdin = nil,
-    buf = {},
+    buf = "",
+    buf_pos = 1,
     pending = {},
     pending_chunks = {},
     pending_timers = {},
@@ -24,16 +25,29 @@ function Parser.new(_self, binary_path)
   return setmetatable(tbl, Parser)
 end
 
----@param buf string
+local function _decode_len(data, offset)
+  return string.byte(data, offset)
+       + string.byte(data, offset + 1) * 256
+       + string.byte(data, offset + 2) * 65536
+       + string.byte(data, offset + 3) * 16777216
+end
+
+local function _encode_len(len)
+  return string.char(
+    len % 256,
+    math.floor(len / 256) % 256,
+    math.floor(len / 65536) % 256,
+    math.floor(len / 16777216) % 256
+  )
+end
+
+---@param data string
 ---@return string|nil, number
-local function _read_frame(buf)
-  if #buf < 4 then return nil, 0 end
-  local len = string.byte(buf, 1)
-            + string.byte(buf, 2) * 256
-            + string.byte(buf, 3) * 65536
-            + string.byte(buf, 4) * 16777216
-  if #buf < 4 + len then return nil, 0 end
-  return buf:sub(5, 4 + len), 4 + len
+local function _read_frame(data)
+  if #data < 4 then return nil, 0 end
+  local len = _decode_len(data, 1)
+  if #data < 4 + len then return nil, 0 end
+  return data:sub(5, 4 + len), 4 + len
 end
 
 ---@return boolean
@@ -66,6 +80,8 @@ function Parser:start()
     end
     self_ref.pending = {}
     self_ref.pending_chunks = {}
+    self_ref.buf = ""
+    self_ref.buf_pos = 1
   end)
 
   if not self._process then
@@ -84,7 +100,7 @@ function Parser:start()
     end
     if not data then return end
     if #data == 0 then return end
-    self_ref.buf[#self_ref.buf + 1] = data
+    self_ref.buf = self_ref.buf .. data
     self_ref:_process_buf()
   end)
 
@@ -101,12 +117,12 @@ function Parser:start()
 end
 
 function Parser:_process_buf()
-  local concat = table.concat(self.buf)
-  if #concat == 0 then return end
+  local data = self.buf
+  if #data == 0 then return end
+  local pos = self.buf_pos
 
-  local pos = 1
-  while pos <= #concat do
-    local frame, consumed = _read_frame(concat:sub(pos))
+  while pos <= #data do
+    local frame, consumed = _read_frame(data:sub(pos))
     if not frame then break end
     pos = pos + consumed
     local ok, resp = pcall(vim.mpack.decode, frame)
@@ -120,12 +136,11 @@ function Parser:_process_buf()
     end
   end
 
-  -- Keep only unprocessed bytes (avoid re-allocating the entire buffer)
-  local remaining = concat:sub(pos)
-  if #remaining > 0 then
-    self.buf = { remaining }
+  if pos > #data then
+    self.buf = ""
+    self.buf_pos = 1
   else
-    self.buf = {}
+    self.buf_pos = pos
   end
 end
 
@@ -268,13 +283,7 @@ function Parser:send(cmd, callback)
     return
   end
 
-  local len = #encoded
-  self.stdin:write(string.char(
-    len % 256,
-    math.floor(len / 256) % 256,
-    math.floor(len / 65536) % 256,
-    math.floor(len / 16777216) % 256
-  ))
+  self.stdin:write(_encode_len(#encoded))
   self.stdin:write(encoded)
 end
 

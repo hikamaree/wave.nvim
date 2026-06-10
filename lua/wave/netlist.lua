@@ -1,4 +1,7 @@
+local viewer = require("wave.viewer")
+
 local M = {}
+local _pending_requests = {} ---@type table<number, boolean>
 
 ---@class NetlistState
 
@@ -133,11 +136,12 @@ function M._on_enter()
       st.expanded_scopes[sid] = true
       M._refresh_view()
       if not _parser then return end
+      local req_id = sid
       _parser:send({ cmd = "get_children", id = sid, start_index = 0 }, function(resp)
         if not resp.success then return end
-        st = _get_state()
-        if not st then return end
-        st.children_cache[sid] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
+        local st2 = _get_state()
+        if not st2 then return end
+        st2.children_cache[req_id] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
         vim.schedule(function()
           if M.is_open() then M._refresh_view() end
         end)
@@ -198,7 +202,6 @@ function M._add_signal_at_cursor()
 
   local var = _find_var_recursive(st.current_scope_id, var_name)
   if var then
-    local viewer = require("wave.viewer")
     viewer.add_signal(var.netlist_id or 0, var.signal_id or 0, var.name, var.width or 1)
   end
 end
@@ -238,11 +241,15 @@ function M._refresh_view()
   if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
   if not st.children_cache[st.current_scope_id] then
     if not _parser then return end
-    _parser:send({ cmd = "get_children", id = st.current_scope_id, start_index = 0 }, function(resp)
+    if _pending_requests[st.current_scope_id] then return end
+    _pending_requests[st.current_scope_id] = true
+    local load_scope = st.current_scope_id
+    _parser:send({ cmd = "get_children", id = load_scope, start_index = 0 }, function(resp)
+      _pending_requests[load_scope] = nil
       if not resp.success then return end
-      st = _get_state()
-      if not st then return end
-      st.children_cache[st.current_scope_id] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
+      local st2 = _get_state()
+      if not st2 or st2.current_scope_id ~= load_scope then return end
+      st2.children_cache[load_scope] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
       vim.schedule(function()
         if M.is_open() then M._refresh_view() end
       end)
@@ -253,28 +260,34 @@ function M._refresh_view()
     return
   end
 
-  vim.bo[buf].modifiable = true
-  local lines = {}
+  local ok = pcall(function()
+    vim.bo[buf].modifiable = true
+    local lines = {}
 
-  local breadcrumb = "Netlist"
-  for _, item in ipairs(st.tree_stack) do
-    breadcrumb = breadcrumb .. " > " .. item.name
+    local breadcrumb = "Netlist"
+    for _, item in ipairs(st.tree_stack) do
+      breadcrumb = breadcrumb .. " > " .. item.name
+    end
+    table.insert(lines, breadcrumb)
+    table.insert(lines, string.rep("─", vim.api.nvim_win_get_width(st.win) or 50))
+
+    local tree_lines = _render_level(st.current_scope_id, 0)
+    for _, l in ipairs(tree_lines) do table.insert(lines, l) end
+
+    if #tree_lines == 0 then
+      table.insert(lines, "  (empty)")
+    end
+
+    table.insert(lines, "")
+    table.insert(lines, "<CR>:expand/collapse  <BS>:back  a:add signal  q:close")
+
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+  end)
+  if not ok then
+    vim.bo[buf].modifiable = false
+    vim.notify("[wave] Netlist render error", vim.log.levels.ERROR)
   end
-  table.insert(lines, breadcrumb)
-  table.insert(lines, string.rep("─", vim.api.nvim_win_get_width(st.win) or 50))
-
-  local tree_lines = _render_level(st.current_scope_id, 0)
-  for _, l in ipairs(tree_lines) do table.insert(lines, l) end
-
-  if #tree_lines == 0 then
-    table.insert(lines, "  (empty)")
-  end
-
-  table.insert(lines, "")
-  table.insert(lines, "<CR>:expand/collapse  <BS>:back  a:add signal  q:close")
-
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
 end
 
 return M
