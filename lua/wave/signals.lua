@@ -1,16 +1,8 @@
 --- Signal management: add, remove, group displayed signals.
 
 ---@class DisplayedSignal
----@field netlist_id number
----@field signal_id number
----@field name string
----@field value_changes table|nil
----@field width number
----@field expanded boolean
-
 local M = {}
 
----@type DisplayedSignal[]
 local displayed_signals = {}
 
 ---@param netlist_id number

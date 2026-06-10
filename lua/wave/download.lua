@@ -22,7 +22,9 @@ function M.download()
   local api_url = ("https://api.github.com/repos/%s/releases/latest"):format(repo)
   local ok2, resp = pcall(vim.fn.system, { "curl", "-sL", "--connect-timeout", "10", api_url })
   if not ok2 or vim.v.shell_error ~= 0 then
-    vim.notify("[wave] Failed to fetch latest release info. If rate-limited, try: gh auth token | xargs -I{} curl -sL -H 'Authorization: Bearer {}' " .. api_url, vim.log.levels.WARN)
+    vim.notify("[wave] Failed to fetch latest release info. "
+      .. "If rate-limited, try: gh auth token | xargs -I{} curl -sL -H 'Authorization: Bearer {}' "
+      .. api_url, vim.log.levels.WARN)
     return nil
   end
 

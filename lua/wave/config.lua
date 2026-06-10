@@ -1,21 +1,12 @@
 ---@class WaveColors
----@field signal string|nil
----@field cursor string|nil
----@field label string|nil
----@field signal_hl string|nil
----@field cursor_hl string|nil
----@field label_hl string|nil
-
 ---@class WaveConfig
----@field parser_binary string
----@field colors WaveColors
----@field keymaps table<string, string>
 
 local M = {}
 
 ---@type WaveConfig
 M.defaults = {
   parser_binary = vim.fn.stdpath("data") .. "/wave/wave",
+  ---@type WaveColors
   colors = {
     signal = "#98c379",
     cursor = nil,
@@ -38,7 +29,7 @@ M.defaults = {
 }
 
 ---@type WaveConfig
-M.options = {}
+M.options = vim.deepcopy(M.defaults)
 
 ---@param opts WaveConfig|nil
 function M.setup(opts)

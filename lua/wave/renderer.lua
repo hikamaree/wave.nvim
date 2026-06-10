@@ -12,7 +12,7 @@ local function resolve_color(c, key_prefix, fallback)
   local hl_key = key_prefix .. "_hl"
   if c[hl_key] then
     local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = c[hl_key] })
-    if ok and hl and hl.fg then return hl.fg end
+    if ok and hl and hl.fg then return tostring(hl.fg) end
   end
   return c[key_prefix] or fallback
 end
@@ -256,7 +256,7 @@ end
 ---@param time_start number
 ---@param time_end number
 ---@param width number
----@param value_changes table|nil
+---@param value_changes table
 ---@return string, string
 function M.render_ruler(time_start, time_end, width, value_changes)
   local time_range = time_end - time_start
@@ -264,7 +264,7 @@ function M.render_ruler(time_start, time_end, width, value_changes)
   local ticks = {}
   for i = 1, width do nums[i] = " "; ticks[i] = " " end
 
-  if value_changes and #value_changes > 0 and time_range > 0 then
+  if #value_changes > 0 and time_range > 0 then
     local col_vc_end = {}
     local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
 

@@ -436,9 +436,11 @@ do
   end
 
   -- 10b. Kill the subprocess
-  local pid = p._process:get_pid()
+  ---@type any
+  local uvproc = p._process
+  local pid = uvproc:get_pid()
   check("crash: got pid", type(pid) == "number" and pid > 0, tostring(pid))
-  p._process:kill("sigkill")
+  uvproc:kill("sigkill")
   check("crash: kill signal sent", true)
 
   -- 10c. Wait for crashed flag

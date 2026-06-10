@@ -1,18 +1,6 @@
 local M = {}
 
 ---@class Parser
----@field binary_path string
----@field stdin userdata|nil
----@field buf string[]
----@field pending table<number, function>
----@field pending_chunks table<number, table[]>
----@field pending_timers table<number, any>
----@field next_id number
----@field ready boolean
----@field crashed boolean
----@field _process userdata|nil
----@field _stdout userdata|nil
----@field _stderr userdata|nil
 local Parser = {}
 Parser.__index = Parser
 
@@ -20,8 +8,9 @@ local REQUEST_TIMEOUT_MS = 30000
 
 ---@param binary_path string
 ---@return Parser
-function Parser:new(binary_path)
-  return setmetatable({
+function Parser.new(_self, binary_path)
+  ---@type Parser
+  local tbl = {
     binary_path = binary_path,
     stdin = nil,
     buf = {},
@@ -31,7 +20,8 @@ function Parser:new(binary_path)
     next_id = 1,
     ready = false,
     crashed = false,
-  }, Parser)
+  }
+  return setmetatable(tbl, Parser)
 end
 
 ---@param buf string

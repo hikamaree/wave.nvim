@@ -19,17 +19,6 @@ local HELP_GROUPS = {
 }
 
 ---@class ViewerState
----@field buf number|nil
----@field win number|nil
----@field time_start number
----@field time_end number
----@field file_time_end number
----@field time_unit string
----@field cursor_time number|nil
----@field file_info table|nil
----@field label_width number
----@field zoom_n number
----@field file_name string|nil
 
 ---@type table<number, ViewerState>
 local _states = {}
@@ -43,7 +32,7 @@ local function _get_state()
 end
 
 ---@param buf number
----@param win number
+---@param win number|nil
 ---@return ViewerState
 local function _make_state(buf, win)
   local st = {
@@ -90,7 +79,7 @@ end
 function M.is_open()
   if not _viewer_buf then return false end
   local st = _states[_viewer_buf]
-  return st and st.win and vim.api.nvim_win_is_valid(st.win)
+  return st and st.win and vim.api.nvim_win_is_valid(st.win) or false
 end
 
 function M.close()
@@ -170,13 +159,13 @@ function M.open(uri)
         return
       end
       local info = resp.data
-      st = _get_state()
-      if not st then return end
-      st.file_info = { uri = uri }
-      st.file_time_end = info.time_end or 1000
-      st.time_end = st.file_time_end
-      st.time_unit = info.time_unit or "ns"
-      st.time_start = 0
+      local st2 = _get_state()
+      if not st2 then return end
+      st2.file_info = { uri = uri }
+      st2.file_time_end = info.time_end or 1000
+      st2.time_end = st2.file_time_end
+      st2.time_unit = info.time_unit or "ns"
+      st2.time_start = 0
       vim.schedule(function()
         vim.notify("[wave] Loaded: " .. fname .. " (" .. info.format .. ", " .. info.var_count .. " signals)")
         M._render()
@@ -254,6 +243,7 @@ function M._reload()
   local st = _get_state()
   if not st or not st.file_info then return end
   signals.remove_all()
+  if not _parser then return end
   _parser:send({ cmd = "close" }, function()
     M.open(st.file_info.uri)
   end)
@@ -272,6 +262,7 @@ function M.add_signal(netlist_id, signal_id, name, width)
   M._render()
   local st = _get_state()
   local file_time_end = st and st.file_time_end or 1000
+  if not _parser then return end
   _parser:send({
     cmd = "get_signal_data",
     signal_ids = { signal_id },
@@ -298,6 +289,7 @@ function M.add_signal_prompt()
   vim.ui.input({ prompt = "Signal name: " }, function(input)
     if input and input ~= "" then
       if st.file_info then
+        if not _parser then return end
         _parser:send({ cmd = "search", search_query = input }, function(resp)
           if resp.success and resp.data and resp.data.search_results and #resp.data.search_results > 0 then
             local results = resp.data.search_results
@@ -334,6 +326,7 @@ end
 ---@return number|nil
 function M._detect_period()
   local min_gap = math.huge
+  ---@type number|nil
   local min_period = math.huge
   for _, sig in ipairs(signals.get_all()) do
     if sig.width == 1 and sig.value_changes and #sig.value_changes >= 3 then
@@ -623,40 +616,36 @@ function M.marker_next_edge()
   M._render()
 end
 
-function M._render()
-  local st = _get_state()
-  if not st or not st.win or not vim.api.nvim_win_is_valid(st.win) then return end
-  local buf = vim.api.nvim_win_get_buf(st.win)
-  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
-  local win_width = vim.api.nvim_win_get_width(st.win)
-
-  vim.api.nvim_buf_set_option(buf, "modifiable", true)
-  vim.api.nvim_buf_clear_namespace(buf, renderer.get_ns(), 0, -1)
-
-  local lines = {}
-  local hlmarks = {}
-  local lw = st.label_width
-  local ww = math.max(win_width - lw - LABEL_GAP, MIN_WAVEFORM_WIDTH)
-
-  -- Header
-  local header = ""
-  if st.file_name then
-    header = header .. st.file_name
-  end
-  local time_range = st.time_end - st.time_start
-  header = header .. "  " .. math.floor(st.time_start) .. "-" .. math.floor(st.time_end) .. " " .. (st.time_unit or "ns")
+---@param st table
+---@return string
+local function _build_header(st)
+  local parts = {}
+  if st.file_name then table.insert(parts, st.file_name) end
+  table.insert(parts, math.floor(st.time_start) .. "-" .. math.floor(st.time_end) .. " " .. (st.time_unit or "ns"))
   if st.cursor_time then
-    header = header .. "  ────  @" .. math.floor(st.cursor_time)
+    table.insert(parts, "────  @" .. math.floor(st.cursor_time))
   end
   local zv = _zoom_value(st.zoom_n)
-  header = header .. string.format("  Z:%sx", zv >= 1 and math.floor(zv) or string.format("1/%d", -st.zoom_n))
-  table.insert(lines, header)
+  table.insert(parts, string.format("Z:%sx", zv >= 1 and math.floor(zv) or string.format("1/%d", -st.zoom_n)))
+  return table.concat(parts, "  ")
+end
 
-  -- Signals
-  local all_signals = signals.get_all()
+---@param st table
+---@param ww number
+---@return number|nil
+local function _cursor_col(st, ww)
+  if not st.cursor_time then return nil end
+  local time_range = st.time_end - st.time_start
+  if time_range <= 0 then return nil end
+  return renderer.time_to_col(st.cursor_time, st.time_start, time_range, ww)
+end
 
-  -- Ruler: use first single-bit signal with data
-  local ruler_vc
+---@param lines string[]
+---@param st table
+---@param ww number
+---@param all_signals table[]
+local function _add_ruler_rows(lines, st, ww, all_signals)
+  local ruler_vc = {}
   for _, sig in ipairs(all_signals) do
     if sig.width == 1 and sig.value_changes and #sig.value_changes > 0 then
       ruler_vc = sig.value_changes
@@ -664,78 +653,106 @@ function M._render()
     end
   end
   local num_line, tick_line = renderer.render_ruler(st.time_start, st.time_end, ww, ruler_vc)
-  table.insert(lines, string.rep(" ", lw + 1) .. num_line)
-  table.insert(lines, string.rep(" ", lw + 1) .. tick_line)
+  local pad = string.rep(" ", st.label_width + 1)
+  table.insert(lines, pad .. num_line)
+  table.insert(lines, pad .. tick_line)
   table.insert(lines, "")
+end
 
-  -- Pre-calculate cursor column for highlights
-  local cursor_col
-  if st.cursor_time then
-    local time_range = st.time_end - st.time_start
-    if time_range > 0 then
-      cursor_col = renderer.time_to_col(st.cursor_time, st.time_start, time_range, ww)
-    end
+---@param sig table
+---@param lw number
+---@return string
+local function _signal_label(sig, lw)
+  local label = sig.name or "?"
+  if sig.width and sig.width > 1 then
+    label = label .. "[" .. sig.width .. "]"
   end
+  if sig.expanded then label = label .. " ▼" end
+  if #label > lw then
+    return label:sub(1, lw)
+  end
+  return label .. string.rep(" ", lw - #label)
+end
+
+---@param sig table
+---@param st table
+---@param ww number
+---@param is_multi boolean
+---@return string, string
+local function _render_waveform(sig, st, ww, is_multi)
+  if not sig.value_changes then
+    return string.rep(" ", ww) .. " (loading...)", string.rep(" ", ww)
+  end
+
+  local ok, top_str, bot_str
+  if is_multi then
+    ok, top_str, bot_str = pcall(renderer.render_multi_bit, sig.value_changes, st.time_start, st.time_end, ww)
+  else
+    ok, top_str, bot_str = pcall(renderer.render_single_bit, sig.value_changes, st.time_start, st.time_end, ww)
+  end
+
+  if not ok then
+    vim.notify("[wave] Render error for " .. (sig.name or "?"), vim.log.levels.WARN)
+    return string.rep("?", ww), string.rep("?", ww)
+  end
+
+  return top_str, bot_str
+end
+
+---@param hlmarks table[]
+---@param top_ndx number
+---@param bot_ndx number
+---@param lw number
+---@param top_str string
+---@param bot_str string
+local function _add_signal_hlmarks(hlmarks, top_ndx, bot_ndx, lw, top_str, bot_str)
+  table.insert(hlmarks, { top_ndx, 1, 1 + lw, "WaveLabel" })
+  if #top_str > 0 then
+    table.insert(hlmarks, { top_ndx, lw + 1, lw + 1 + #top_str, "WaveSignal" })
+  end
+  if #bot_str > 0 then
+    table.insert(hlmarks, { bot_ndx, lw + 1, lw + 1 + #bot_str, "WaveSignal" })
+  end
+end
+
+---@param lines string[]
+---@param hlmarks table[]
+---@param all_signals table[]
+---@param st table
+---@param ww number
+---@param lw number
+local function _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
   if #all_signals == 0 then
     table.insert(lines, string.rep(" ", lw) .. "  No signals. Press 'a' to add, or :WaveNetlist")
-  else
-    for _, sig in ipairs(all_signals) do
-      local label = sig.name or "?"
-      if sig.width and sig.width > 1 then
-        label = label .. "[" .. sig.width .. "]"
-      end
-      if sig.expanded then label = label .. " ▼" end
-      if #label > lw then
-        label = label:sub(1, lw)
-      else
-        label = label .. string.rep(" ", lw - #label)
-      end
-
-      local is_multi = sig.width and sig.width > 1
-
-      local top_str, bot_str
-  if not sig.value_changes then
-    top_str = string.rep(" ", ww) .. " (loading...)"
-    bot_str = string.rep(" ", ww)
-  else
-    local ok
-    if is_multi then
-      ok, top_str, bot_str = pcall(renderer.render_multi_bit, sig.value_changes, st.time_start, st.time_end, ww)
-    else
-      ok, top_str, bot_str = pcall(renderer.render_single_bit, sig.value_changes, st.time_start, st.time_end, ww)
-    end
-    if not ok then
-      top_str = string.rep("?", ww)
-      bot_str = string.rep("?", ww)
-      vim.notify("[wave] Render error for " .. (sig.name or "?"), vim.log.levels.WARN)
-    end
-  end
-      local top_ndx = #lines
-      local bot_ndx = #lines + 1
-      local sig_top = " " .. label .. top_str
-      local sig_bot = " " .. string.rep(" ", lw) .. bot_str
-      table.insert(lines, sig_top)
-      table.insert(lines, sig_bot)
-      table.insert(hlmarks, { top_ndx, 1, 1 + lw, "WaveLabel" })
-      if #sig_top > lw + 1 then
-        table.insert(hlmarks, { top_ndx, lw + 1, #sig_top, "WaveSignal" })
-      end
-      if #sig_bot > lw + 1 then
-        table.insert(hlmarks, { bot_ndx, lw + 1, #sig_bot, "WaveSignal" })
-      end
-      -- Multi-bit expanded value table
-      if is_multi and sig.expanded then
-        local vlines = renderer.render_value_table(sig, lw)
-        for _, vl in ipairs(vlines) do
-          table.insert(lines, vl)
-        end
-      end
-
-      table.insert(lines, string.rep(" ", 1 + lw + ww))
-    end
+    return
   end
 
-  -- Bottom
+  for _, sig in ipairs(all_signals) do
+    local label = _signal_label(sig, lw)
+    local is_multi = sig.width and sig.width > 1
+    local top_str, bot_str = _render_waveform(sig, st, ww, is_multi)
+    local top_ndx = #lines
+    local bot_ndx = #lines + 1
+
+    table.insert(lines, " " .. label .. top_str)
+    table.insert(lines, " " .. string.rep(" ", lw) .. bot_str)
+    _add_signal_hlmarks(hlmarks, top_ndx, bot_ndx, lw, top_str, bot_str)
+
+    if is_multi and sig.expanded then
+      local vlines = renderer.render_value_table(sig, lw)
+      for _, vl in ipairs(vlines) do
+        table.insert(lines, vl)
+      end
+    end
+
+    table.insert(lines, string.rep(" ", 1 + lw + ww))
+  end
+end
+
+---@param lines string[]
+---@param lw number
+---@param ww number
+local function _add_bottom_bar(lines, lw, ww)
   table.insert(lines, string.rep(" ", 1 + lw + ww))
   local km = config.options.keymaps
   local group_parts = {}
@@ -745,41 +762,75 @@ function M._render()
       local lhs = km[action]
       if lhs then
         local disp = lhs:gsub("^<(.+)>$", function(s) return s:upper() end)
-        entries[#entries + 1] = disp .. ":" .. action
+        table.insert(entries, disp .. ":" .. action)
       end
     end
-    group_parts[#group_parts + 1] = table.concat(entries, "  ")
+    table.insert(group_parts, table.concat(entries, "  "))
   end
   table.insert(lines, table.concat(group_parts, "  │  "))
+end
 
-  -- Pad short lines so cursor extmarks can be placed
-  local min_width = 1 + lw + ww
+---@param buf number
+---@param lines string[]
+local function _write_buffer(buf, lines)
+  local min_width = 0
+  for _, line in ipairs(lines) do
+    if #line > min_width then min_width = #line end
+  end
   for i = 1, #lines do
     if #lines[i] < min_width then
       lines[i] = lines[i] .. string.rep(" ", min_width - #lines[i])
     end
   end
-
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+end
 
+---@param buf number
+---@param hlmarks table[]
+---@param lines string[]
+---@param cursor_col number|nil
+---@param lw number
+local function _apply_extmarks(buf, hlmarks, lines, cursor_col, lw)
   local ns_id = renderer.get_ns()
   for _, m in ipairs(hlmarks) do
     vim.api.nvim_buf_set_extmark(buf, ns_id, m[1], m[2], { hl_group = m[4], end_col = m[3] })
   end
-  -- Cursor vertical bar through waveform area (skip header and info)
-  if cursor_col then
-    local abs_col = cursor_col + lw + 1
-    for i = 3, #lines - 2 do
-      local prefix = vim.fn.strcharpart(lines[i], 0, abs_col)
-      vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, #prefix, {
-        virt_text = { { "┃", "WaveCursor" } },
-        virt_text_pos = "overlay",
-        priority = 1000,
-      })
-    end
+  if not cursor_col then return end
+  local abs_col = cursor_col + lw + 1
+  for i = 3, #lines - 2 do
+    local prefix = vim.fn.strcharpart(lines[i], 0, abs_col)
+    vim.api.nvim_buf_set_extmark(buf, ns_id, i - 1, #prefix, {
+      virt_text = { { "┃", "WaveCursor" } },
+      virt_text_pos = "overlay",
+      priority = 1000,
+    })
   end
+end
 
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+function M._render()
+  local st = _get_state()
+  if not st or not st.win or not vim.api.nvim_win_is_valid(st.win) then return end
+  local buf = vim.api.nvim_win_get_buf(st.win)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_clear_namespace(buf, renderer.get_ns(), 0, -1)
+
+  local lw = st.label_width
+  local ww = math.max(vim.api.nvim_win_get_width(st.win) - lw - LABEL_GAP, MIN_WAVEFORM_WIDTH)
+  local all_signals = signals.get_all()
+
+  local lines = {}
+  local hlmarks = {}
+  local cursor_col = _cursor_col(st, ww)
+
+  table.insert(lines, _build_header(st))
+  _add_ruler_rows(lines, st, ww, all_signals)
+  _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
+  _add_bottom_bar(lines, lw, ww)
+  _write_buffer(buf, lines)
+  _apply_extmarks(buf, hlmarks, lines, cursor_col, lw)
+  vim.bo[buf].modifiable = false
 end
 
 return M

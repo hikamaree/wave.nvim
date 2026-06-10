@@ -1,12 +1,6 @@
 local M = {}
 
 ---@class NetlistState
----@field buf number|nil
----@field win number|nil
----@field children_cache table<number, {scopes:table[], vars:table[]}>
----@field expanded_scopes table<number, boolean>
----@field tree_stack table[]
----@field current_scope_id number|nil
 
 ---@type Parser|nil
 local _parser = nil
@@ -20,7 +14,9 @@ local function _get_state()
   return _states[_netlist_buf]
 end
 
+---@return NetlistState
 local function _make_state(buf, win, scope_id, scope_name)
+  ---@type NetlistState
   local st = {
     buf = buf,
     win = win,
@@ -85,7 +81,7 @@ function M.toggle(scope_id, scope_name)
   })
   vim.wo[win].winfixwidth = true
   local sid = scope_id or 1
-  local st = _make_state(buf, win, sid, scope_name or tostring(sid))
+  _make_state(buf, win, sid, scope_name or tostring(sid))
 
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
@@ -128,7 +124,7 @@ function M._on_enter()
   if line < 1 or line > #lines then return end
   local text = lines[line]
 
-  local indicator, sid_str, scope_name = text:match("%[([%+%-])%]%s+(%d+):(.+)$")
+  local indicator, sid_str = text:match("%[([%+%-])%]%s+(%d+):(.+)$")
   if indicator then
     local sid = tonumber(sid_str)
     if not sid then return end
@@ -136,6 +132,7 @@ function M._on_enter()
     if indicator == "+" then
       st.expanded_scopes[sid] = true
       M._refresh_view()
+      if not _parser then return end
       _parser:send({ cmd = "get_children", id = sid, start_index = 0 }, function(resp)
         if not resp.success then return end
         st = _get_state()
@@ -240,6 +237,7 @@ function M._refresh_view()
   local buf = vim.api.nvim_win_get_buf(st.win)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
   if not st.children_cache[st.current_scope_id] then
+    if not _parser then return end
     _parser:send({ cmd = "get_children", id = st.current_scope_id, start_index = 0 }, function(resp)
       if not resp.success then return end
       st = _get_state()
@@ -249,13 +247,13 @@ function M._refresh_view()
         if M.is_open() then M._refresh_view() end
       end)
     end)
-    vim.api.nvim_buf_set_option(buf, "modifiable", true)
+    vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Netlist", "  (loading...)" })
-    vim.api.nvim_buf_set_option(buf, "modifiable", false)
+    vim.bo[buf].modifiable = false
     return
   end
 
-  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.bo[buf].modifiable = true
   local lines = {}
 
   local breadcrumb = "Netlist"
@@ -276,7 +274,7 @@ function M._refresh_view()
   table.insert(lines, "<CR>:expand/collapse  <BS>:back  a:add signal  q:close")
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.bo[buf].modifiable = false
 end
 
 return M

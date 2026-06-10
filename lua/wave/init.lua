@@ -105,6 +105,10 @@ function M.close_all()
 end
 
 function M.search_netlist()
+  if not parser then
+    vim.notify("[wave] Parser not initialized", vim.log.levels.ERROR)
+    return
+  end
   vim.ui.input({ prompt = "Search netlist: " }, function(query)
     if query and query ~= "" then
       parser:send({ cmd = "search", search_query = query }, function(resp)
@@ -130,7 +134,12 @@ function M.search_netlist()
                 end
               end
               if selected and selected.is_var then
-                viewer.add_signal(selected.netlist_id or 0, selected.signal_id or 0, selected.instance_path, selected.width or 1)
+                viewer.add_signal(
+                  selected.netlist_id or 0,
+                  selected.signal_id or 0,
+                  selected.instance_path,
+                  selected.width or 1
+                )
               end
             end
           end)
