@@ -40,7 +40,7 @@ end
 ---@return number
 function M.time_to_col(t, time_start, time_range, width)
   if time_range <= 0 then return 0 end
-  local col = math.ceil(((t - time_start) / time_range) * width) - 1
+  local col = math.ceil(((t - time_start - EPS) / time_range) * width) - 1
   if col < 0 then return 0 end
   if col >= width then return width - 1 end
   return col
