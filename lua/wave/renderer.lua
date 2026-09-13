@@ -130,31 +130,32 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
     elseif tc == 1 then
       if v ~= "0" and v ~= "1" then
         if nv == "1" then top[c] = "─" else bot[c] = "─" end
-      elseif nv == "1" then
-        top[c] = "┌"
-        bot[c] = "┘"
       else
-        top[c] = "┐"
-        bot[c] = "└"
+        -- A dense neighbor's row always expects a connection, so the edge
+        -- facing it must be a "┬"/"┴" through-shape instead of a dead-end corner.
+        local prev_dense = col > 0 and col_tc[col - 1] >= 2
+        local next_dense = col < width - 1 and col_tc[col + 1] >= 2
+        if nv == "1" then
+          top[c] = prev_dense and "┬" or "┌"
+          bot[c] = next_dense and "┴" or "┘"
+        else
+          top[c] = next_dense and "┬" or "┐"
+          bot[c] = prev_dense and "┴" or "└"
+        end
       end
 
-    else -- tc >= 2
-      if v ~= "0" and v ~= "1" then
-        top[c] = "─"
-        bot[c] = "─"
-      else
-        local prev_clean = (col == 0) or (col_tc[col - 1] <= 1)
-        local next_clean = (col == width - 1) or (col_tc[col + 1] <= 1)
-        if next_clean then
-          if v == "0" then top[c] = "┐"; bot[c] = "┴"
-          else top[c] = "┬"; bot[c] = "┘" end
-        elseif prev_clean then
-          if v == "0" then top[c] = "┌"; bot[c] = "┘"
-          else top[c] = "┐"; bot[c] = "└" end
-        else
-          top[c] = "┬"
-          bot[c] = "┴"
-        end
+    else -- tc >= 2: too many transitions to draw individually, render as a dense band
+      top[c] = "┬"
+      bot[c] = "┴"
+
+      -- A flat neighbor only occupies one row, so the mesh's edge column must
+      -- drop to a corner on the row the flat run doesn't use, or its through-line
+      -- would dangle into nothing.
+      if col > 0 and col_tc[col - 1] == 0 then
+        if v == "1" then bot[c] = "└" else top[c] = "┌" end
+      end
+      if col < width - 1 and col_tc[col + 1] == 0 then
+        if nv == "1" then bot[c] = "┘" else top[c] = "┐" end
       end
     end
   end
