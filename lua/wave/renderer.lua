@@ -148,14 +148,21 @@ function M.render_single_bit(value_changes, time_start, time_end, width)
       top[c] = "┬"
       bot[c] = "┴"
 
-      -- A flat neighbor only occupies one row, so the mesh's edge column must
-      -- drop to a corner on the row the flat run doesn't use, or its through-line
-      -- would dangle into nothing.
-      if col > 0 and col_tc[col - 1] == 0 then
-        if v == "1" then bot[c] = "└" else top[c] = "┌" end
-      end
-      if col < width - 1 and col_tc[col + 1] == 0 then
-        if nv == "1" then bot[c] = "┘" else top[c] = "┐" end
+      local left_flat = col > 0 and col_tc[col - 1] == 0
+      local right_flat = col < width - 1 and col_tc[col + 1] == 0
+
+      if left_flat and right_flat and v == nv then
+        -- Isolated blip: connects to neither side, so use a half-line toward
+        -- the other row instead of a dangling corner.
+        if v == "1" then bot[c] = "╵" else top[c] = "╷" end
+      else
+        -- Drop to a corner on the row the flat neighbor doesn't use.
+        if left_flat then
+          if v == "1" then bot[c] = "└" else top[c] = "┌" end
+        end
+        if right_flat then
+          if nv == "1" then bot[c] = "┘" else top[c] = "┐" end
+        end
       end
     end
   end
@@ -211,8 +218,14 @@ function M.render_multi_bit(value_changes, time_start, time_end, width)
   end
 
   for ti, col in ipairs(trans) do
-    top[col + 1] = "┬"
-    bot[col + 1] = "┴"
+    if col == 0 then
+      -- Fresh start at the viewport edge, matching _place_initial.
+      top[col + 1] = "┌"
+      bot[col + 1] = "└"
+    else
+      top[col + 1] = "┬"
+      bot[col + 1] = "┴"
+    end
     local v = col_val_fmt[col + 1]
     local next_col = trans[ti + 1] or width
     local space = next_col - col - 1
@@ -235,14 +248,18 @@ end
 
 ---@param signal table|nil
 ---@param label_width number
+---@param max_rows number|nil truncate to this many rows if set
 ---@return string[]
-function M.render_value_table(signal, label_width)
+function M.render_value_table(signal, label_width, max_rows)
   local lines = {}
   if not signal or not signal.value_changes or #signal.value_changes == 0 then
     table.insert(lines, string.rep(" ", label_width) .. "  (no data)")
     return lines
   end
-  for _, vc in ipairs(signal.value_changes) do
+  local count = #signal.value_changes
+  if max_rows then count = math.min(count, max_rows) end
+  for i = 1, count do
+    local vc = signal.value_changes[i]
     table.insert(lines, string.rep(" ", label_width) .. "    @" .. vc[1] .. "  " .. fmt_val(vc[2]))
   end
   return lines
@@ -253,8 +270,10 @@ end
 ---@param to_idx number
 ---@return number|nil
 local function _find_first_rise_time(value_changes, from_idx, to_idx)
+  -- Don't require the immediately preceding sample to be "0": an intermediate
+  -- "x"/"z" would otherwise hide the edge.
   for i = from_idx + 1, to_idx do
-    if value_changes[i - 1][2] == "0" and value_changes[i][2] == "1" then
+    if value_changes[i][2] == "1" then
       return tonumber(value_changes[i][1])
     end
   end

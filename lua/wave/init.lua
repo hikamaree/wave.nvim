@@ -54,6 +54,9 @@ function M.setup(opts)
     end
   end
 
+  if parser then
+    parser:stop()
+  end
   parser = Parser.create_parser(binary_path)
 
   local ok = parser:start()

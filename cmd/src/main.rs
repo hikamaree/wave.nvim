@@ -179,10 +179,15 @@ impl AppState {
 
 // ─── Msgpack framing helpers ───
 
+const MAX_FRAME_LEN: usize = 512 * 1024 * 1024;
+
 fn read_frame(reader: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(io::Error::other(format!("frame length {} exceeds max {}", len, MAX_FRAME_LEN)));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(buf)
@@ -301,9 +306,9 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<rmpv::Value, AppError> {
         .map(|v| v.signal_ref())
         .collect();
 
+    let mut param_table = HashMap::new();
     if !param_ids.is_empty() {
         let param_signals = signal_source.load_signals(&param_ids, &hierarchy, false);
-        let mut param_table = HashMap::new();
         for signal in param_signals {
             let signal_ref = signal.signal_ref();
             if let Some(idx) = signal.get_first_time_idx() {
@@ -313,8 +318,9 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<rmpv::Value, AppError> {
                 }
             }
         }
-        state.param_table = Some(param_table);
     }
+    // Overwrite unconditionally so a previous file's parameters can't leak into this one.
+    state.param_table = Some(param_table);
 
     let event_count = time_table.len();
     let time_end = if event_count > 0 { time_table[event_count - 1] } else { 0 };
@@ -538,7 +544,8 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<rmpv::Valu
     let mut results = Vec::new();
 
     let search_scope = if scope_id != 0xFFFFFFFF {
-        ScopeRef::from_index(scope_id as usize).map(|sr| hierarchy.index(sr))
+        let sr = ScopeRef::from_index(scope_id as usize).ok_or(AppError::Illegal(scope_id))?;
+        Some(hierarchy.index(sr))
     } else {
         None
     };
@@ -642,62 +649,54 @@ fn main() {
     let mut writer = stdout.lock();
 
     loop {
+        // Any read error desyncs the frame stream with no way to resync, so it's fatal too.
         let buf = match read_frame(&mut reader) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
                 let _ = send_error(&mut writer, 0, format!("Read error: {}", e));
-                continue;
+                break;
             }
         };
 
         let req: Request = match rmp_serde::from_slice(&buf) {
             Ok(r) => r,
             Err(e) => {
-                let _ = send_error(&mut writer, 0, format!("Parse error: {}", e));
+                if send_error(&mut writer, 0, format!("Parse error: {}", e)).is_err() { break; }
                 continue;
             }
         };
 
         let request_id = req.request_id.unwrap_or(0);
 
-        match req.cmd.as_str() {
+        let write_result = match req.cmd.as_str() {
             "get_signal_data" => {
                 let ids = req.signal_ids.unwrap_or_default();
-                if let Err(_e) = cmd_get_signal_data(&mut state, &ids, req.time_start, req.time_end,
-                    &mut writer, request_id)
-                {
-                    break;
-                }
+                cmd_get_signal_data(&mut state, &ids, req.time_start, req.time_end, &mut writer, request_id)
             }
-            "open" => {
-                let _ = match &req.file {
-                    Some(f) => match cmd_open(&mut state, f) {
-                        Ok(data) => send_final(&mut writer, request_id, data),
-                        Err(e) => send_error(&mut writer, request_id, e.to_string()),
-                    },
-                    None => send_error(&mut writer, request_id, "Missing 'file' argument".to_string()),
-                };
-            }
-            "get_children" => {
-                let _ = match cmd_get_children(&state, req.id.unwrap_or(0), req.start_index.unwrap_or(0)) {
+            "open" => match &req.file {
+                Some(f) => match cmd_open(&mut state, f) {
                     Ok(data) => send_final(&mut writer, request_id, data),
                     Err(e) => send_error(&mut writer, request_id, e.to_string()),
-                };
-            }
-            "search" => {
-                let _ = match cmd_search(&state, req.search_query.as_deref().unwrap_or(""), req.scope_id.unwrap_or(0xFFFFFFFF)) {
-                    Ok(data) => send_final(&mut writer, request_id, data),
-                    Err(e) => send_error(&mut writer, request_id, e.to_string()),
-                };
-            }
+                },
+                None => send_error(&mut writer, request_id, "Missing 'file' argument".to_string()),
+            },
+            "get_children" => match cmd_get_children(&state, req.id.unwrap_or(0), req.start_index.unwrap_or(0)) {
+                Ok(data) => send_final(&mut writer, request_id, data),
+                Err(e) => send_error(&mut writer, request_id, e.to_string()),
+            },
+            "search" => match cmd_search(&state, req.search_query.as_deref().unwrap_or(""), req.scope_id.unwrap_or(0xFFFFFFFF)) {
+                Ok(data) => send_final(&mut writer, request_id, data),
+                Err(e) => send_error(&mut writer, request_id, e.to_string()),
+            },
             "close" => {
                 state = AppState::new();
-                let _ = send_final(&mut writer, request_id, rmpv::Value::Nil);
+                send_final(&mut writer, request_id, rmpv::Value::Nil)
             }
-            cmd => {
-                let _ = send_error(&mut writer, request_id, format!("Unknown command: {}", cmd));
-            }
+            cmd => send_error(&mut writer, request_id, format!("Unknown command: {}", cmd)),
+        };
+        if write_result.is_err() {
+            break;
         }
     }
 }

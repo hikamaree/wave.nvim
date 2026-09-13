@@ -14,7 +14,6 @@ function Parser.new(_self, binary_path)
     binary_path = binary_path,
     stdin = nil,
     buf = "",
-    buf_pos = 1,
     pending = {},
     pending_chunks = {},
     pending_timers = {},
@@ -42,12 +41,14 @@ local function _encode_len(len)
 end
 
 ---@param data string
+---@param offset number 1-based position within data
 ---@return string|nil, number
-local function _read_frame(data)
-  if #data < 4 then return nil, 0 end
-  local len = _decode_len(data, 1)
-  if #data < 4 + len then return nil, 0 end
-  return data:sub(5, 4 + len), 4 + len
+local function _read_frame(data, offset)
+  local avail = #data - offset + 1
+  if avail < 4 then return nil, 0 end
+  local len = _decode_len(data, offset)
+  if avail < 4 + len then return nil, 0 end
+  return data:sub(offset + 4, offset + 3 + len), 4 + len
 end
 
 ---@return boolean
@@ -81,7 +82,6 @@ function Parser:start()
     self_ref.pending = {}
     self_ref.pending_chunks = {}
     self_ref.buf = ""
-    self_ref.buf_pos = 1
   end)
 
   if not self._process then
@@ -119,10 +119,10 @@ end
 function Parser:_process_buf()
   local data = self.buf
   if #data == 0 then return end
-  local pos = self.buf_pos
+  local pos = 1
 
-  while pos <= #data do
-    local frame, consumed = _read_frame(data:sub(pos))
+  while true do
+    local frame, consumed = _read_frame(data, pos)
     if not frame then break end
     pos = pos + consumed
     local ok, resp = pcall(vim.mpack.decode, frame)
@@ -136,12 +136,8 @@ function Parser:_process_buf()
     end
   end
 
-  if pos > #data then
-    self.buf = ""
-    self.buf_pos = 1
-  else
-    self.buf_pos = pos
-  end
+  -- Keep only the unconsumed tail so it can't grow unbounded across reads.
+  self.buf = pos > 1 and data:sub(pos) or data
 end
 
 function Parser:stop()
@@ -150,6 +146,8 @@ function Parser:stop()
     self.stdin = nil
   end
   if self._process then
+    -- Don't rely on the child noticing stdin EOF; kill it outright.
+    pcall(function() self._process:kill("sigterm") end)
     self._process:close()
     self._process = nil
   end
@@ -182,12 +180,13 @@ local function _merge_chunks(resp, chunks)
       end
     end
   end
-  local data = resp.data
-  if type(data) ~= "table" then data = {} end
-  for _, item in ipairs(merged) do
-    table.insert(data, item)
+  -- Final frame's data arrived last, so it goes after the chunks, not before.
+  if type(resp.data) == "table" then
+    for _, item in ipairs(resp.data) do
+      table.insert(merged, item)
+    end
   end
-  resp.data = data
+  resp.data = merged
 end
 
 function Parser:_cancel_request(id)
@@ -215,6 +214,8 @@ function Parser:_handle_response(resp)
       vim.uv.timer_stop(self.pending_timers[resp.request_id])
       vim.uv.timer_start(self.pending_timers[resp.request_id], REQUEST_TIMEOUT_MS, 0, function()
         vim.schedule(function()
+          -- Response may have already cancelled this request before this fired.
+          if not self.pending[resp.request_id] then return end
           self:_cancel_request(resp.request_id)
           vim.notify("[wave] Request " .. resp.request_id .. " timed out", vim.log.levels.WARN)
         end)
@@ -270,6 +271,8 @@ function Parser:send(cmd, callback)
   if self.pending_timers[id] then
     vim.uv.timer_start(self.pending_timers[id], REQUEST_TIMEOUT_MS, 0, function()
       vim.schedule(function()
+        -- Response may have already cancelled this request before this fired.
+        if not self_ref.pending[id] then return end
         self_ref:_cancel_request(id)
         vim.notify("[wave] Request " .. id .. " timed out", vim.log.levels.WARN)
       end)

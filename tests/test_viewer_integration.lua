@@ -313,7 +313,7 @@ if clk_vc then
   signals_mod.add_signal(1, 1, "top.clk", 1)
   signals_mod.set_value_changes(1, clk_vc)
 
-  local sig = signals_mod.get_by_netlist_id(1)
+  local sig = signals_mod.get_by_signal_id(1)
   check("signal found", sig ~= nil)
   if sig then
     check("vc assigned", sig.value_changes ~= nil and #sig.value_changes > 0)

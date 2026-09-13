@@ -25,6 +25,7 @@ M.defaults = {
     add = "a",
     del = "d",
     expand = "<CR>",
+    back = "<Backspace>",
   },
 }
 

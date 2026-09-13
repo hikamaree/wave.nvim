@@ -1,4 +1,5 @@
 local viewer = require("wave.viewer")
+local config = require("wave.config")
 
 local M = {}
 local _pending_requests = {} ---@type table<number, boolean>
@@ -27,6 +28,7 @@ local function _make_state(buf, win, scope_id, scope_name)
     expanded_scopes = {},
     tree_stack = {},
     current_scope_id = scope_id,
+    line_scope = {},
   }
   st.tree_stack = { { id = scope_id, name = scope_name or tostring(scope_id) } }
   _states[buf] = st
@@ -47,25 +49,31 @@ function M.is_open()
 end
 
 function M.close()
-  if not _netlist_buf then return end
-  local st = _states[_netlist_buf]
+  local buf = _netlist_buf
+  if not buf then return end
+  local st = _states[buf]
   if not st then return end
+  -- Clear state before closing: the buffer is bufhidden=wipe, so nvim_win_close
+  -- synchronously re-enters this via BufWipeout -> cleanup_buf.
+  _states[buf] = nil
+  _netlist_buf = nil
+  _pending_requests = {}
   if st.win and vim.api.nvim_win_is_valid(st.win) then
     vim.api.nvim_win_close(st.win, true)
   end
-  _states[_netlist_buf] = nil
-  _netlist_buf = nil
 end
 
 ---@param buf number
 function M.cleanup_buf(buf)
   if _netlist_buf ~= buf then return end
   local st = _states[buf]
+  -- Same reentrancy hazard as M.close (this is also the BufWipeout handler).
+  _states[buf] = nil
+  _netlist_buf = nil
+  _pending_requests = {}
   if st and st.win and vim.api.nvim_win_is_valid(st.win) then
     pcall(vim.api.nvim_win_close, st.win, true)
   end
-  _states[buf] = nil
-  _netlist_buf = nil
 end
 
 ---@param scope_id number|nil
@@ -111,10 +119,39 @@ function M._setup_keymaps()
     })
   end
 
-  map("<CR>", function() M._on_enter() end)
-  map("<Backspace>", function() M._on_back() end)
-  map("a", function() M._add_signal_at_cursor() end)
-  map("q", function() M.close() end)
+  local km = config.options.keymaps
+  map(km.expand or "<CR>", function() M._on_enter() end)
+  map(km.back or "<Backspace>", function() M._on_back() end)
+  map(km.add or "a", function() M._add_signal_at_cursor() end)
+  map(km.close or "q", function() M.close() end)
+end
+
+--- Pages through get_children while remaining_items > 0.
+---@param scope_id number
+---@param on_done fun(children: {scopes: table[], vars: table[]}|nil)
+local function _fetch_all_children(scope_id, on_done)
+  if not _parser then
+    on_done(nil)
+    return
+  end
+  local acc = { scopes = {}, vars = {} }
+  local function step(start_index)
+    _parser:send({ cmd = "get_children", id = scope_id, start_index = start_index }, function(resp)
+      if not resp.success then
+        on_done(nil)
+        return
+      end
+      local data = resp.data or {}
+      for _, s in ipairs(data.scopes or {}) do table.insert(acc.scopes, s) end
+      for _, v in ipairs(data.vars or {}) do table.insert(acc.vars, v) end
+      if (data.remaining_items or 0) > 0 then
+        step(start_index + (data.total_returned or 0))
+      else
+        on_done(acc)
+      end
+    end)
+  end
+  step(0)
 end
 
 function M._on_enter()
@@ -135,13 +172,12 @@ function M._on_enter()
     if indicator == "+" then
       st.expanded_scopes[sid] = true
       M._refresh_view()
-      if not _parser then return end
       local req_id = sid
-      _parser:send({ cmd = "get_children", id = sid, start_index = 0 }, function(resp)
-        if not resp.success then return end
+      _fetch_all_children(sid, function(children)
+        if not children then return end
         local st2 = _get_state()
         if not st2 then return end
-        st2.children_cache[req_id] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
+        st2.children_cache[req_id] = children
         vim.schedule(function()
           if M.is_open() then M._refresh_view() end
         end)
@@ -164,26 +200,6 @@ function M._on_back()
   end
 end
 
----@param scope_id number
----@param name string
----@return table|nil
-local function _find_var_recursive(scope_id, name)
-  local st = _get_state()
-  if not st then return nil end
-  local cache = st.children_cache[scope_id]
-  if not cache then return nil end
-  for _, v in ipairs(cache.vars) do
-    if v.name == name then return v end
-  end
-  for _, s in ipairs(cache.scopes) do
-    if st.expanded_scopes[s.id] then
-      local found = _find_var_recursive(s.id, name)
-      if found then return found end
-    end
-  end
-  return nil
-end
-
 function M._add_signal_at_cursor()
   local st = _get_state()
   if not st or not st.win then return end
@@ -200,7 +216,17 @@ function M._add_signal_at_cursor()
   if not var_name then return end
   var_name = var_name:gsub("%s+%[%d+:%d+%]$", "")
 
-  local var = _find_var_recursive(st.current_scope_id, var_name)
+  -- Resolve via the line's owning scope; sibling scopes can share a variable name.
+  local scope_id = st.line_scope[line]
+  local cache = scope_id and st.children_cache[scope_id]
+  if not cache then return end
+  local var
+  for _, v in ipairs(cache.vars) do
+    if v.name == var_name then
+      var = v
+      break
+    end
+  end
   if var then
     viewer.add_signal(var.netlist_id or 0, var.signal_id or 0, var.name, var.width or 1)
   end
@@ -208,20 +234,20 @@ end
 
 ---@param scope_id number
 ---@param indent number
----@return string[]
-local function _render_level(scope_id, indent)
+---@param lines string[] output, appended in place
+---@param line_scopes number[] output, appended in place
+local function _render_level(scope_id, indent, lines, line_scopes)
   local st = _get_state()
-  if not st then return {} end
+  if not st then return end
   local cache = st.children_cache[scope_id]
-  if not cache then return {} end
-  local lines = {}
+  if not cache then return end
   local ind = string.rep("  ", indent)
   for _, s in ipairs(cache.scopes) do
     local expanded = st.expanded_scopes[s.id]
     table.insert(lines, ind .. "  [" .. (expanded and "-" or "+") .. "] " .. tostring(s.id) .. ":" .. s.name)
+    table.insert(line_scopes, scope_id)
     if expanded then
-      local sub = _render_level(s.id, indent + 1)
-      for _, l in ipairs(sub) do table.insert(lines, l) end
+      _render_level(s.id, indent + 1, lines, line_scopes)
     end
   end
   for _, v in ipairs(cache.vars) do
@@ -230,8 +256,8 @@ local function _render_level(scope_id, indent)
       val_str = string.format(" [%d:0]", v.width - 1)
     end
     table.insert(lines, ind .. "  [VAR] " .. v.name .. val_str)
+    table.insert(line_scopes, scope_id)
   end
-  return lines
 end
 
 function M._refresh_view()
@@ -244,12 +270,12 @@ function M._refresh_view()
     if _pending_requests[st.current_scope_id] then return end
     _pending_requests[st.current_scope_id] = true
     local load_scope = st.current_scope_id
-    _parser:send({ cmd = "get_children", id = load_scope, start_index = 0 }, function(resp)
+    _fetch_all_children(load_scope, function(children)
       _pending_requests[load_scope] = nil
-      if not resp.success then return end
+      if not children then return end
       local st2 = _get_state()
       if not st2 or st2.current_scope_id ~= load_scope then return end
-      st2.children_cache[load_scope] = { scopes = resp.data.scopes or {}, vars = resp.data.vars or {} }
+      st2.children_cache[load_scope] = children
       vim.schedule(function()
         if M.is_open() then M._refresh_view() end
       end)
@@ -271,8 +297,16 @@ function M._refresh_view()
     table.insert(lines, breadcrumb)
     table.insert(lines, string.rep("─", vim.api.nvim_win_get_width(st.win) or 50))
 
-    local tree_lines = _render_level(st.current_scope_id, 0)
+    local header_lines = #lines
+    local tree_lines = {}
+    local tree_scopes = {}
+    _render_level(st.current_scope_id, 0, tree_lines, tree_scopes)
     for _, l in ipairs(tree_lines) do table.insert(lines, l) end
+
+    st.line_scope = {}
+    for i, sid in ipairs(tree_scopes) do
+      st.line_scope[header_lines + i] = sid
+    end
 
     if #tree_lines == 0 then
       table.insert(lines, "  (empty)")

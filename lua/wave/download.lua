@@ -2,18 +2,40 @@ local M = {}
 
 local repo = "hikamaree/wave.nvim"
 
----@return string
+---@return string|nil
 local function platform()
-  local sysname = vim.uv.os_uname().sysname
+  local sysname = vim.uv.os_uname().sysname:lower()
+  local os
+  if sysname:match("linux") then
+    os = "linux"
+  elseif sysname:match("darwin") then
+    os = "macos"
+  else
+    return nil
+  end
   local machine = vim.uv.os_uname().machine
-  local os = sysname:lower():match("linux") and "linux" or "macos"
   local arch = machine:lower():gsub("amd64", "x86_64"):gsub("arm64", "aarch64")
   return arch .. "-" .. os
+end
+
+local NON_BINARY_SUFFIXES = { "%.sha256$", "%.sha512$", "%.sig$", "%.asc$", "%.md5$", "%.txt$" }
+
+---@param name string
+---@return boolean
+local function looks_like_binary_asset(name)
+  for _, suffix in ipairs(NON_BINARY_SUFFIXES) do
+    if name:match(suffix) then return false end
+  end
+  return true
 end
 
 ---@return string|nil
 function M.download()
   local target = platform()
+  if not target then
+    vim.notify("[wave] Unsupported platform: " .. vim.uv.os_uname().sysname, vim.log.levels.WARN)
+    return nil
+  end
   local dest = vim.fn.stdpath("data") .. "/wave"
   local binary = dest .. "/wave"
 
@@ -45,7 +67,7 @@ function M.download()
 
   local asset
   for _, a in ipairs(data.assets) do
-    if a.name and a.name:find(target, 1, true) then
+    if a.name and a.name:find(target, 1, true) and looks_like_binary_asset(a.name) then
       asset = a
       break
     end
@@ -56,8 +78,8 @@ function M.download()
     return nil
   end
 
-  -- Download to a temp file first to avoid partial downloads
-  local tmp = binary .. ".tmp"
+  -- Download to a temp file first to avoid partial downloads.
+  local tmp = binary .. ".tmp." .. vim.fn.getpid()
   local url = asset.browser_download_url
   local ok3 = pcall(vim.fn.system, { "curl", "-fsL", "--connect-timeout", "10", "-o", tmp, url })
   if not ok3 or vim.v.shell_error ~= 0 then
@@ -66,9 +88,9 @@ function M.download()
     return nil
   end
 
-  -- Verify the downloaded file is non-empty (curl with -f would have errored on HTTP errors)
-  local info = vim.fn.getftime(tmp)
-  if info == -1 or info == 0 then
+  -- Verify the downloaded file is non-empty (curl with -f would have errored on HTTP errors).
+  local size = vim.fn.getfsize(tmp)
+  if size <= 0 then
     vim.notify("[wave] Downloaded file is empty", vim.log.levels.WARN)
     pcall(os.remove, tmp)
     return nil

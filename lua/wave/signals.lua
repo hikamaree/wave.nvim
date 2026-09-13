@@ -96,7 +96,8 @@ function M.get_edges()
             seen[t] = true
             _all_edges[#_all_edges + 1] = t
             if #_all_edges >= MAX_EDGES then
-              _all_edges = {}
+              -- Return what was gathered so far instead of discarding it all.
+              table.sort(_all_edges)
               return _all_edges
             end
           end

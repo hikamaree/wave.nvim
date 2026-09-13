@@ -89,26 +89,20 @@ end
 
 function M.close()
   if not _viewer_buf then return end
-  local st = _states[_viewer_buf]
-  if not st then return end
-  if st.win and vim.api.nvim_win_is_valid(st.win) then
-    vim.api.nvim_win_close(st.win, true)
-  end
-  _states[_viewer_buf] = nil
-  local old_buf = _viewer_buf
+  -- Only ever delete the buffer, never the window: M.open() reuses whatever
+  -- window is current rather than owning a dedicated one, and this can be the
+  -- last window left.
+  local buf = _viewer_buf
+  _states[buf] = nil
   _viewer_buf = nil
-  if vim.api.nvim_buf_is_valid(old_buf) then
-    pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
+  if vim.api.nvim_buf_is_valid(buf) then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
 end
 
 ---@param buf number
 function M.cleanup_buf(buf)
   if _viewer_buf ~= buf then return end
-  local st = _states[buf]
-  if st and st.win and vim.api.nvim_win_is_valid(st.win) then
-    pcall(vim.api.nvim_win_close, st.win, true)
-  end
   _states[buf] = nil
   _viewer_buf = nil
   if vim.api.nvim_buf_is_valid(buf) then
@@ -247,10 +241,13 @@ end
 function M._reload()
   local st = _get_state()
   if not st or not st.file_info then return end
+  local uri = st.file_info.uri
   signals.remove_all()
+  -- M.open() no-ops when already open on the same uri, so close first.
+  M.close()
   if not _parser then return end
   _parser:send({ cmd = "close" }, function()
-    M.open(st.file_info.uri)
+    M.open(uri)
   end)
 end
 
@@ -277,6 +274,7 @@ function M.add_signal(netlist_id, signal_id, name, width)
     if resp.success and resp.data and #resp.data > 0 then
       local data = resp.data[1]
       signals.set_value_changes(signal_id, data.value_changes)
+      M._invalidate_period_cache()
       if M.is_open() then
         st = _get_state()
         if st and st.time_end == st.file_time_end then
@@ -330,6 +328,11 @@ end
 
 ---@return number|nil
 local _period_cache = { period = nil, signal_count = 0 }
+
+--- Call when a signal's value_changes arrives asynchronously.
+function M._invalidate_period_cache()
+  _period_cache.period = nil
+end
 
 function M._detect_period()
   local all_signals = signals.get_all()
@@ -396,7 +399,7 @@ function M._update_viewport_from_zoom()
   local min_range = math.min(period * 2, max_range)
   range = math.max(min_range, math.min(range, max_range))
 
-  local center = st.cursor_time or (st.time_start + (st.time_end - st.time_start)) / 2
+  local center = st.cursor_time or (st.time_start + st.time_end) / 2
   st.time_start = math.max(0, center - range / 2)
   st.time_end = st.time_start + range
   if st.time_end > max_range and st.time_start > 0 then
@@ -717,10 +720,12 @@ local function _signal_label(sig, lw)
     label = label .. "[" .. sig.width .. "]"
   end
   if sig.expanded then label = label .. " ▼" end
-  if #label > lw then
-    return label:sub(1, lw - 1) .. "…"
+  -- Display width, not byte length: "▼"/"…" are multi-byte but one column.
+  local width = vim.fn.strdisplaywidth(label)
+  if width > lw then
+    return vim.fn.strcharpart(label, 0, lw - 1) .. "…"
   end
-  return label .. string.rep(" ", lw - #label)
+  return label .. string.rep(" ", lw - width)
 end
 
 ---@param sig table
@@ -788,7 +793,7 @@ local function _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
     _add_signal_hlmarks(hlmarks, top_ndx, bot_ndx, lw, top_str, bot_str)
 
     if is_multi and sig.expanded then
-      local vlines = renderer.render_value_table(sig, lw)
+      local vlines = renderer.render_value_table(sig, lw, MAX_EXPANDED_ROWS)
       for _, vl in ipairs(vlines) do
         table.insert(lines, vl)
       end
