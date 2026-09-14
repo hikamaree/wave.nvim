@@ -18,14 +18,14 @@ M.defaults = {
     scroll_right = "l",
     zoom_in = "i",
     zoom_out = "o",
-    fit = "0",
     prev_edge = "H",
     next_edge = "L",
     cursor = "<Space>",
-    add = "a",
+    netlist = "n",
     del = "d",
     expand = "<CR>",
     back = "<Backspace>",
+    search = "/",
   },
 }
 

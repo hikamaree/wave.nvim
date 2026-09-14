@@ -1,5 +1,6 @@
 local viewer = require("wave.viewer")
 local config = require("wave.config")
+local search = require("wave.search")
 
 local M = {}
 local _pending_requests = {} ---@type table<number, boolean>
@@ -26,11 +27,10 @@ local function _make_state(buf, win, scope_id, scope_name)
     win = win,
     children_cache = {},
     expanded_scopes = {},
-    tree_stack = {},
+    root_name = scope_name or tostring(scope_id),
     current_scope_id = scope_id,
     line_scope = {},
   }
-  st.tree_stack = { { id = scope_id, name = scope_name or tostring(scope_id) } }
   _states[buf] = st
   _netlist_buf = buf
   return st
@@ -122,8 +122,14 @@ function M._setup_keymaps()
   local km = config.options.keymaps
   map(km.expand or "<CR>", function() M._on_enter() end)
   map(km.back or "<Backspace>", function() M._on_back() end)
-  map(km.add or "a", function() M._add_signal_at_cursor() end)
+  map(km.search or "/", function() M.search() end)
   map(km.close or "q", function() M.close() end)
+end
+
+function M.search()
+  search.prompt(function(r)
+    viewer.add_signal(r.netlist_id or 0, r.signal_id or 0, r.instance_path, r.width or 1)
+  end)
 end
 
 --- Pages through get_children while remaining_items > 0.
@@ -188,16 +194,25 @@ function M._on_enter()
     end
     return
   end
+
+  if text:match("%[VAR%]") then
+    M._add_signal_at_cursor()
+  end
 end
 
+--- Collapses the scope under the cursor, or its owning scope if the cursor
+--- is on one of that scope's children, folding back up toward the root.
 function M._on_back()
   local st = _get_state()
-  if not st then return end
-  if #st.tree_stack > 1 then
-    table.remove(st.tree_stack)
-    st.current_scope_id = st.tree_stack[#st.tree_stack].id
-    M._refresh_view()
-  end
+  if not st or not st.win then return end
+  local cursor = vim.api.nvim_win_get_cursor(st.win)
+  local buf = vim.api.nvim_win_get_buf(st.win)
+  local line_text = vim.api.nvim_buf_get_lines(buf, cursor[1] - 1, cursor[1], false)[1] or ""
+  local own_sid = line_text:match("%[%-%]%s+(%d+):")
+  local scope_id = own_sid and tonumber(own_sid) or st.line_scope[cursor[1]]
+  if not scope_id or not st.expanded_scopes[scope_id] then return end
+  st.expanded_scopes[scope_id] = nil
+  M._refresh_view()
 end
 
 function M._add_signal_at_cursor()
@@ -290,11 +305,7 @@ function M._refresh_view()
     vim.bo[buf].modifiable = true
     local lines = {}
 
-    local breadcrumb = "Netlist"
-    for _, item in ipairs(st.tree_stack) do
-      breadcrumb = breadcrumb .. " > " .. item.name
-    end
-    table.insert(lines, breadcrumb)
+    table.insert(lines, "Netlist > " .. st.root_name)
     table.insert(lines, string.rep("─", vim.api.nvim_win_get_width(st.win) or 50))
 
     local header_lines = #lines
@@ -313,7 +324,11 @@ function M._refresh_view()
     end
 
     table.insert(lines, "")
-    table.insert(lines, "<CR>:expand/collapse  <BS>:back  a:add signal  q:close")
+    local km = config.options.keymaps
+    table.insert(lines, (km.expand or "<CR>") .. ": expand/collapse/add")
+    table.insert(lines, (km.back or "<Backspace>") .. ": back")
+    table.insert(lines, (km.search or "/") .. ": search")
+    table.insert(lines, (km.close or "q") .. ": close")
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false

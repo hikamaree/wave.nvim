@@ -1,6 +1,7 @@
 local signals = require("wave.signals")
 local renderer = require("wave.renderer")
 local config = require("wave.config")
+local search = require("wave.search")
 
 local M = {}
 
@@ -18,9 +19,9 @@ local LABEL_LEAD_SPACE = 1
 local HELP_GROUPS = {
   { "close" },
   { "scroll_left", "scroll_right" },
-  { "zoom_in", "zoom_out", "fit" },
+  { "zoom_in", "zoom_out" },
   { "prev_edge", "next_edge", "cursor" },
-  { "add", "del", "expand" },
+  { "netlist", "search", "del", "expand" },
 }
 
 ---@class ViewerState
@@ -57,6 +58,16 @@ end
 
 ---@type Parser|nil
 local _parser = nil
+
+---@type fun()|nil
+local _open_netlist = nil
+
+--- Lets init.lua wire up netlist.toggle() without viewer.lua requiring
+--- wave.netlist, which already requires wave.viewer.
+---@param fn fun()
+function M.set_netlist_opener(fn)
+  _open_netlist = fn
+end
 
 ---@return number
 local function _waveform_width()
@@ -162,7 +173,7 @@ function M.open(uri)
       if not st2 then return end
       st2.file_info = { uri = uri }
       st2.file_time_end = info.time_end or 1000
-      st2.time_end = st2.file_time_end
+      st2.time_end = st2.file_time_end * ZOOM_OUT_MARGIN
       st2.time_unit = info.time_unit or "ns"
       st2.time_start = 0
       vim.schedule(function()
@@ -192,7 +203,8 @@ local KEYMAP_ACTIONS = {
   prev_edge = function() M.marker_prev_edge() end,
   next_edge = function() M.marker_next_edge() end,
   cursor = function() M.set_cursor_at_view() end,
-  add = function() M.add_signal_prompt() end,
+  netlist = function() if _open_netlist then _open_netlist() end end,
+  search = function() M.add_signal_prompt() end,
   del = function() M.remove_signal_at_cursor() end,
   expand = function() M._toggle_signal_expand() end,
 }
@@ -276,10 +288,6 @@ function M.add_signal(netlist_id, signal_id, name, width)
       signals.set_value_changes(signal_id, data.value_changes)
       M._invalidate_period_cache()
       if M.is_open() then
-        st = _get_state()
-        if st and st.time_end == st.file_time_end then
-          M._update_viewport_from_zoom()
-        end
         M._render()
       end
     end
@@ -288,41 +296,12 @@ end
 
 function M.add_signal_prompt()
   local st = _get_state()
-  if not st then return end
-  vim.ui.input({ prompt = "Signal name: " }, function(input)
-    if input and input ~= "" then
-      if st.file_info then
-        if not _parser then return end
-        _parser:send({ cmd = "search", search_query = input }, function(resp)
-          if resp.success and resp.data and resp.data.search_results and #resp.data.search_results > 0 then
-            local results = resp.data.search_results
-            local vars = {}
-            for _, r in ipairs(results) do
-              if r.is_var then table.insert(vars, r) end
-            end
-            if #vars == 0 then
-              vim.notify("[wave] No signal found matching: " .. input, vim.log.levels.INFO)
-              return
-            end
-            local found
-            local lower_input = input:lower()
-            local name_only = input:match("[^.]*$"):lower()
-            for _, r in ipairs(vars) do
-              if r.instance_path:lower() == lower_input
-                  or r.instance_path:match("[^.]*$"):lower() == name_only then
-                found = r; break
-              end
-            end
-            if not found then found = vars[1] end
-            M.add_signal(found.netlist_id or 0, found.signal_id or 0, found.instance_path, found.width or 1)
-          else
-            vim.notify("[wave] Signal not found: " .. input, vim.log.levels.WARN)
-          end
-        end)
-      else
-        vim.notify("[wave] No file loaded", vim.log.levels.WARN)
-      end
-    end
+  if not st or not st.file_info then
+    vim.notify("[wave] No file loaded", vim.log.levels.WARN)
+    return
+  end
+  search.prompt(function(r)
+    M.add_signal(r.netlist_id or 0, r.signal_id or 0, r.instance_path, r.width or 1)
   end)
 end
 
@@ -497,29 +476,13 @@ end
 function M.zoom_out()
   local st = _get_state()
   if not st then return end
-  local next_n = _next_zoom_out()
-  local period = M._detect_period()
-  if period and period > 0 and st.file_time_end then
-    local ww = _waveform_width()
-    if ww >= MIN_WAVEFORM_WIDTH then
-      local new_range = ww * period / _zoom_value(next_n)
-      local cur_range = st.time_end - st.time_start
-      local zoom_out_limit = st.file_time_end * ZOOM_OUT_MARGIN
-      if new_range > zoom_out_limit and cur_range >= zoom_out_limit then return end
-    end
-  end
-  st.zoom_n = next_n
+  local zoom_out_limit = (st.file_time_end or math.huge) * ZOOM_OUT_MARGIN
+  if st.time_end - st.time_start >= zoom_out_limit then return end
+  st.zoom_n = _next_zoom_out()
   M._update_viewport_from_zoom()
   M._render()
 end
 
-function M.zoom_fit()
-  local st = _get_state()
-  if not st then return end
-  st.time_start = 0
-  st.time_end = st.file_time_end or 1000
-  M._render()
-end
 
 function M._clamp_view()
   local st = _get_state()
@@ -777,7 +740,7 @@ end
 ---@param lw number
 local function _add_signal_rows(lines, hlmarks, all_signals, st, ww, lw)
   if #all_signals == 0 then
-    table.insert(lines, string.rep(" ", lw) .. "  No signals. Press 'a' to add, or :WaveNetlist")
+    table.insert(lines, string.rep(" ", lw) .. "  No signals added yet")
     return
   end
 

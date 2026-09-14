@@ -17,6 +17,7 @@ local config = require("wave.config")
 local Parser = require("wave.parser")
 local viewer = require("wave.viewer")
 local netlist = require("wave.netlist")
+local search = require("wave.search")
 local download = require("wave.download")
 
 local M = {}
@@ -67,6 +68,8 @@ function M.setup(opts)
 
   viewer.setup(parser)
   netlist.setup(parser)
+  search.setup(parser)
+  viewer.set_netlist_opener(M.open_netlist)
 
   M._register_commands()
   M._register_autocommands()
@@ -108,47 +111,8 @@ function M.close_all()
 end
 
 function M.search_netlist()
-  if not parser then
-    vim.notify("[wave] Parser not initialized", vim.log.levels.ERROR)
-    return
-  end
-  vim.ui.input({ prompt = "Search netlist: " }, function(query)
-    if query and query ~= "" then
-      parser:send({ cmd = "search", search_query = query }, function(resp)
-        if resp.success and resp.data then
-          local results = resp.data.search_results
-          if not results or #results == 0 then
-            vim.notify("[wave] No results for: " .. query, vim.log.levels.INFO)
-            return
-          end
-
-          local items = {}
-          for _, r in ipairs(results) do
-            table.insert(items, r.instance_path .. " (" .. r.item_type .. ")")
-          end
-
-          vim.ui.select(items, { prompt = "Netlist search results:" }, function(choice)
-            if choice then
-              local selected
-              for i, item in ipairs(items) do
-                if item == choice then
-                  selected = results[i]
-                  break
-                end
-              end
-              if selected and selected.is_var then
-                viewer.add_signal(
-                  selected.netlist_id or 0,
-                  selected.signal_id or 0,
-                  selected.instance_path,
-                  selected.width or 1
-                )
-              end
-            end
-          end)
-        end
-      end)
-    end
+  search.prompt(function(r)
+    viewer.add_signal(r.netlist_id or 0, r.signal_id or 0, r.instance_path, r.width or 1)
   end)
 end
 

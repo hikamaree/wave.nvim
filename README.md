@@ -44,13 +44,14 @@ require("wave").setup({
     scroll_right = "l",
     zoom_in     = "i",
     zoom_out    = "o",
-    fit         = "0",
     prev_edge   = "H",
     next_edge   = "L",
     cursor      = "<Space>",
-    add         = "a",
+    netlist     = "n",
     del         = "d",
     expand      = "<CR>",
+    back        = "<Backspace>",
+    search      = "/",
   },
 })
 ```
@@ -72,12 +73,23 @@ require("wave").setup({
 | `q` | Close viewer |
 | `h` / `l` | Scroll left / right |
 | `i` / `o` | Zoom in / out |
-| `0` | Zoom to fit |
 | `H` / `L` | Previous / next edge |
 | `<Space>` | Set cursor at center |
-| `a` | Add signal by name |
+| `n` | Toggle netlist tree |
+| `/` | Search signals and add one |
 | `d` | Remove signal at cursor |
 | `<CR>` | Expand multi-bit signal |
+
+### Default keymaps (inside netlist buffer)
+
+| Key | Action |
+|-----|--------|
+| `q` | Close netlist |
+| `<CR>` | Expand/collapse scope, or add signal under cursor |
+| `<Backspace>` | Collapse enclosing scope |
+| `/` | Search signals and add one |
+
+With [fzf-lua](https://github.com/ibhagwan/fzf-lua) installed, search opens straight into its live fuzzy-filtered prompt — type directly, no separate query step. Otherwise it falls back to a query prompt followed by `vim.ui.select`.
 
 These are customizable via `setup({ keymaps = { ... } })`. Unset keys fall back to defaults.
 

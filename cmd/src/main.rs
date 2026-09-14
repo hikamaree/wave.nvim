@@ -530,15 +530,10 @@ fn cmd_get_signal_data(
     send_final(writer, request_id, rmpv::Value::Nil)
 }
 
+const MAX_SEARCH_RESULTS: usize = 5000;
+
 fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<rmpv::Value, AppError> {
     let hierarchy = state.hierarchy.as_ref().ok_or(AppError::NoFile)?;
-
-    if query.is_empty() {
-        return to_msgpack(&SearchResult {
-            total_results: 0,
-            search_results: vec![],
-        });
-    }
 
     let lower_query = query.to_lowercase();
     let mut results = Vec::new();
@@ -628,7 +623,7 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<rmpv::Valu
     }
 
     let total = results.len();
-    results.truncate(100);
+    results.truncate(MAX_SEARCH_RESULTS);
 
     let result = SearchResult {
         total_results: total,
