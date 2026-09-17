@@ -15,6 +15,9 @@ local CURSOR_SKIP_LINES = 2  -- header (1) + ruler numbers (1)
 local MAX_EXPANDED_ROWS = 1000
 local MAX_LABEL_RATIO = 0.3
 local LABEL_LEAD_SPACE = 1
+local MAX_SIGNAL_POINTS = 20000
+local FETCH_MARGIN = 1
+local REFETCH_ZOOM_FACTOR = 2
 
 local HELP_GROUPS = {
   { "close" },
@@ -274,24 +277,49 @@ function M.add_signal(netlist_id, signal_id, name, width)
     return
   end
   M._render()
+end
+
+---@param sig DisplayedSignal
+---@param st ViewerState
+---@return boolean
+local function _needs_fetch(sig, st)
+  if sig.loading then return false end
+  local w = sig.window
+  if not w then return true end
+  local range = st.time_end - st.time_start
+  return st.time_start < w[1] or st.time_end > w[2]
+    or w[2] - w[1] > range * (1 + 2 * FETCH_MARGIN) * REFETCH_ZOOM_FACTOR
+end
+
+function M._fetch_visible_data()
   local st = _get_state()
-  local file_time_end = st and st.file_time_end or 1000
-  if not _parser then return end
-  _parser:send({
-    cmd = "get_signal_data",
-    signal_ids = { signal_id },
-    time_start = 0,
-    time_end = file_time_end,
-  }, function(resp)
-    if resp.success and resp.data and #resp.data > 0 then
-      local data = resp.data[1]
-      signals.set_value_changes(signal_id, data.value_changes)
-      M._invalidate_period_cache()
-      if M.is_open() then
-        M._render()
-      end
+  if not st or not st.file_info or not _parser then return end
+  local range = st.time_end - st.time_start
+  local window = {
+    math.max(0, math.floor(st.time_start - range * FETCH_MARGIN)),
+    math.ceil(st.time_end + range * FETCH_MARGIN),
+  }
+  for _, sig in ipairs(signals.get_all()) do
+    if _needs_fetch(sig, st) then
+      sig.loading = true
+      _parser:send({
+        cmd = "get_signal_data",
+        signal_ids = { sig.signal_id },
+        time_start = window[1],
+        time_end = window[2],
+        max_points = MAX_SIGNAL_POINTS,
+      }, function(resp)
+        sig.loading = false
+        sig.window = window
+        local data = resp.success and resp.data and resp.data[1]
+        if data then
+          sig.period = data.period
+          signals.set_value_changes(sig.signal_id, data.value_changes)
+        end
+        if M.is_open() then M._render() end
+      end)
     end
-  end)
+  end
 end
 
 function M.add_signal_prompt()
@@ -306,59 +334,14 @@ function M.add_signal_prompt()
 end
 
 ---@return number|nil
-local _period_cache = { period = nil, signal_count = 0 }
-
---- Call when a signal's value_changes arrives asynchronously.
-function M._invalidate_period_cache()
-  _period_cache.period = nil
-end
-
 function M._detect_period()
-  local all_signals = signals.get_all()
-  if _period_cache.period ~= nil and _period_cache.signal_count == #all_signals then
-    return _period_cache.period
-  end
-  local min_gap = math.huge
-  ---@type number|nil
-  local min_period = math.huge
-  for _, sig in ipairs(all_signals) do
-    if sig.width == 1 and sig.value_changes and #sig.value_changes >= 3 then
-      local last_rise, last_fall
-      for i = 1, #sig.value_changes - 1 do
-        local t = tonumber(sig.value_changes[i][1])
-        local nt = tonumber(sig.value_changes[i + 1][1])
-        if t and nt then
-          local gap = nt - t
-          if gap > 0 and gap < min_gap then min_gap = gap end
-          local v, nv = sig.value_changes[i][2], sig.value_changes[i + 1][2]
-          if v == "0" and nv == "1" then
-            if last_rise then
-              local p = t - last_rise
-              if p > 0 and p < min_period then min_period = p end
-            end
-            last_rise = t
-          elseif v == "1" and nv == "0" then
-            if last_fall then
-              local p = t - last_fall
-              if p > 0 and p < min_period then min_period = p end
-            end
-            last_fall = t
-          end
-        end
-      end
+  local period
+  for _, sig in ipairs(signals.get_all()) do
+    if sig.period and (not period or sig.period < period) then
+      period = sig.period
     end
   end
-  _period_cache.period = nil
-  if min_period == math.huge then
-    if min_gap ~= math.huge then
-      min_period = min_gap * 2
-    else
-      min_period = nil
-    end
-  end
-  _period_cache.period = min_period
-  _period_cache.signal_count = #all_signals
-  return min_period
+  return period
 end
 
 function M._update_viewport_from_zoom()
@@ -435,11 +418,14 @@ function M._toggle_signal_expand()
   end
 end
 
+local ZOOM_OUT_LINEAR_LIMIT = -8
+
 ---@return number
 local function _next_zoom_in()
   local st = _get_state()
   if not st then return 1 end
-  if st.zoom_n == -2 then return 1
+  if st.zoom_n < ZOOM_OUT_LINEAR_LIMIT then return math.floor(st.zoom_n / 2)
+  elseif st.zoom_n == -2 then return 1
   elseif st.zoom_n == 1 then return 2
   else return st.zoom_n + 2
   end
@@ -449,7 +435,8 @@ end
 local function _next_zoom_out()
   local st = _get_state()
   if not st then return -2 end
-  if st.zoom_n == 2 then return 1
+  if st.zoom_n <= ZOOM_OUT_LINEAR_LIMIT then return st.zoom_n * 2
+  elseif st.zoom_n == 2 then return 1
   elseif st.zoom_n == 1 then return -2
   else return st.zoom_n - 2
   end
@@ -460,13 +447,12 @@ function M.zoom_in()
   if not st then return end
   local next_n = _next_zoom_in()
   local period = M._detect_period()
-  if period and period > 0 then
-    local ww = _waveform_width()
-    if ww >= MIN_WAVEFORM_WIDTH then
-      local new_range = ww * period / _zoom_value(next_n)
-      local cur_range = st.time_end - st.time_start
-      if new_range < period * 2 and cur_range <= period * 2 then return end
-    end
+  if not period then return end
+  local ww = _waveform_width()
+  if ww >= MIN_WAVEFORM_WIDTH then
+    local new_range = ww * period / _zoom_value(next_n)
+    local cur_range = st.time_end - st.time_start
+    if new_range < period * 2 and cur_range <= period * 2 then return end
   end
   st.zoom_n = next_n
   M._update_viewport_from_zoom()
@@ -834,6 +820,7 @@ function M._render()
   if not st or not st.win or not vim.api.nvim_win_is_valid(st.win) then return end
   local buf = vim.api.nvim_win_get_buf(st.win)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  M._fetch_visible_data()
 
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_clear_namespace(buf, renderer.get_ns(), 0, -1)

@@ -46,14 +46,23 @@ function M.time_to_col(t, time_start, time_range, width)
   return col
 end
 
+local NIBBLE_HEX = {}
+for n = 0, 15 do
+  local bits = ""
+  for b = 3, 0, -1 do bits = bits .. math.floor(n / 2 ^ b) % 2 end
+  NIBBLE_HEX[bits] = string.format("%X", n)
+end
+
 ---@param v string
 ---@return string
 local function fmt_val(v)
-  if #v > 1 and not v:find("[^01]") then
-    local d = tonumber(v, 2)
-    if d then return string.format("0x%X", d) end
+  if #v <= 1 or v:find("[^01]") then return v end
+  local bits = string.rep("0", (4 - #v % 4) % 4) .. v
+  local hex = {}
+  for i = 1, #bits, 4 do
+    hex[#hex + 1] = NIBBLE_HEX[bits:sub(i, i + 3)]
   end
-  return v
+  return "0x" .. (table.concat(hex):match("^0*(.+)$"))
 end
 
 ---@param value_changes table
@@ -177,10 +186,11 @@ end
 ---@param end_col number
 local function _place_initial(top, bot, v, start_col, end_col)
   top[start_col] = "┌"; bot[start_col] = "└"
-  local vlen = math.min(#v, end_col - start_col)
-  for c = 1, end_col - start_col do
+  local avail = end_col - start_col
+  local show_label = #v <= avail
+  for c = 1, avail do
     local idx = start_col + c
-    if c <= vlen then top[idx] = v:sub(c, c) else top[idx] = "─" end
+    if show_label and c <= #v then top[idx] = v:sub(c, c) else top[idx] = "─" end
     bot[idx] = "─"
   end
 end
@@ -229,11 +239,11 @@ function M.render_multi_bit(value_changes, time_start, time_end, width)
     local v = col_val_fmt[col + 1]
     local next_col = trans[ti + 1] or width
     local space = next_col - col - 1
-    local vlen = math.min(#v, space)
+    local show_label = #v <= space
     for c = 1, next_col - col - 1 do
       local idx = col + 1 + c
       if idx <= width then
-        if c <= vlen then
+        if show_label and c <= #v then
           top[idx] = v:sub(c, c)
         else
           top[idx] = "─"

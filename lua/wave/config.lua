@@ -5,7 +5,7 @@ local M = {}
 
 ---@type WaveConfig
 M.defaults = {
-  parser_binary = vim.fn.stdpath("data") .. "/wave/wave",
+  parser_binary = nil,
   ---@type WaveColors
   colors = {
     signal = "#98c379",

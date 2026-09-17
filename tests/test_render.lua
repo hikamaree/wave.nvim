@@ -197,6 +197,23 @@ for _, t in ipairs(mb_tests) do
   total_g = total_g + #gl
 end
 
+local hex_cases = {
+  { string.rep("1", 64), "0xFFFFFFFFFFFFFFFF" },
+  { "1" .. string.rep("0", 52) .. "1", "0x20000000000001" },
+  { "101", "0x5" },
+  { "0000", "0x0" },
+  { "10x1", "10x1" },
+}
+for _, c in ipairs(hex_cases) do
+  local line = renderer.render_value_table({ value_changes = { { 0, c[1] } } }, 0)[1]
+  local got = line:match("@0  (.+)$")
+  if got ~= c[2] then
+    all_ok = false
+    total_g = total_g + 1
+    print(string.format("HEX FAIL: %s -> %s (expected %s)", c[1], tostring(got), c[2]))
+  end
+end
+
 print(string.rep("=", 70))
 if all_ok then
   print("ALL PASS - no rendering glitches")

@@ -1,10 +1,10 @@
 use wellen::{
-    Hierarchy, Scope, ScopeRef, SignalRef, SignalSource, TimeTable,
+    Hierarchy, Scope, ScopeRef, Signal, SignalRef, SignalSource, SignalValueRef, TimeTable,
     TimescaleUnit, LoadOptions,
 };
-use wellen::viewers::{read_body, read_header};
+use wellen::viewers::{read_body, read_header_from_file};
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::ops::Index;
 use std::fs::File;
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ struct Request {
     start_index: Option<u32>,
     time_start: Option<u64>,
     time_end: Option<u64>,
+    max_points: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -96,10 +97,12 @@ struct ChildrenResult {
     remaining_items: i32,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 struct SignalDataResult {
     signal_id: u32,
     value_changes: Vec<(u64, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    period: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +158,11 @@ fn to_msgpack<T: Serialize>(val: &T) -> Result<rmpv::Value, AppError> {
 
 // ─── Global state ───
 
+struct CachedSignal {
+    signal: Signal,
+    period: Option<u64>,
+}
+
 struct AppState {
     hierarchy: Option<Hierarchy>,
     signal_source: Option<SignalSource>,
@@ -162,6 +170,7 @@ struct AppState {
     time_unit: String,
     time_end: u64,
     param_table: Option<HashMap<u32, String>>,
+    signal_cache: HashMap<SignalRef, CachedSignal>,
 }
 
 impl AppState {
@@ -173,6 +182,7 @@ impl AppState {
             time_unit: "ns".to_string(),
             time_end: 0,
             param_table: None,
+            signal_cache: HashMap::new(),
         }
     }
 }
@@ -261,15 +271,14 @@ fn send_error(writer: &mut impl Write, request_id: u64, error: String) -> io::Re
 // ─── Command handlers ───
 
 fn cmd_open(state: &mut AppState, path: &str) -> Result<rmpv::Value, AppError> {
-    let file = File::open(path).map_err(|e| AppError::File(e.to_string()))?;
+    File::open(path).map_err(|e| AppError::File(e.to_string()))?;
 
     let load_opts = LoadOptions {
-        multi_thread: false,
+        multi_thread: true,
         remove_scopes_with_empty_name: false,
     };
 
-    let reader = BufReader::new(file);
-    let header = read_header(reader, &load_opts)
+    let header = read_header_from_file(path, &load_opts)
         .map_err(|e| AppError::Wellen(format!("Failed to read header: {:?}", e)))?;
 
     let hierarchy = header.hierarchy;
@@ -363,6 +372,7 @@ fn cmd_open(state: &mut AppState, path: &str) -> Result<rmpv::Value, AppError> {
     state.time_table = Some(time_table);
     state.time_unit = time_unit.clone();
     state.time_end = time_end;
+    state.signal_cache.clear();
 
     let info = FileInfo {
         format: format!("{:?}", header.file_format),
@@ -448,11 +458,119 @@ fn cmd_get_children(state: &AppState, id: u32, start_index: u32) -> Result<rmpv:
     to_msgpack(&result)
 }
 
+fn single_bit(value: &SignalValueRef) -> Option<u8> {
+    match value {
+        SignalValueRef::BitVec(bits) if bits.width() == 1 => Some(bits.get_bit(0).into()),
+        _ => None,
+    }
+}
+
+/// Shortest rise-to-rise/fall-to-fall distance, else twice the shortest gap.
+fn detect_period(signal: &Signal, time_table: &[u64]) -> Option<u64> {
+    let indices = signal.time_indices();
+    if indices.len() < 3 {
+        return None;
+    }
+
+    let mut min_period: Option<u64> = None;
+    let mut last_edge: [Option<u64>; 2] = [None, None];
+    let mut prev_bit: Option<u8> = None;
+    for (tidx, value) in signal.iter_changes() {
+        let Some(bit) = single_bit(&value) else { break };
+        if bit <= 1 && prev_bit.is_some_and(|p| p <= 1 && p != bit) {
+            let t = time_table[tidx as usize];
+            if let Some(last) = last_edge[bit as usize].filter(|&last| t > last) {
+                min_period = Some(min_period.map_or(t - last, |p| p.min(t - last)));
+            }
+            last_edge[bit as usize] = Some(t);
+        }
+        prev_bit = Some(bit);
+    }
+
+    min_period.or_else(|| {
+        indices
+            .windows(2)
+            .map(|w| time_table[w[1] as usize] - time_table[w[0] as usize])
+            .filter(|&gap| gap > 0)
+            .min()
+            .map(|gap| gap * 2)
+    })
+}
+
+/// With `max_points`, keeps only the first and last change of each time bucket.
+fn signal_data(
+    signal: &Signal,
+    time_table: &[u64],
+    time_start: Option<u64>,
+    start_idx: usize,
+    end_idx: usize,
+    max_points: Option<usize>,
+) -> Vec<(u64, String)> {
+    let indices = signal.time_indices();
+    let time_at = |i: usize| time_table[indices[i] as usize];
+    let lo = indices.partition_point(|&i| (i as usize) < start_idx);
+    let hi = indices.partition_point(|&i| (i as usize) < end_idx);
+
+    let mut value_changes: Vec<(u64, String)> = Vec::new();
+    if let Some(ts) = time_start {
+        if lo > 0 {
+            let offset = signal.get_offset(indices[lo - 1]).expect("change exists before window");
+            value_changes.push((ts, signal.get_value_at(&offset, offset.elements - 1).to_string()));
+        } else if !indices.is_empty() && time_at(0) > ts {
+            value_changes.push((ts, "x".to_string()));
+        }
+    }
+
+    let bucket_width = max_points
+        .filter(|&mp| mp >= 2 && hi - lo > mp)
+        .map(|mp| (time_at(hi - 1) - time_at(lo)).div_ceil(mp as u64 / 2).max(1));
+    let bucket = |i: usize, width: u64| (time_at(i) - time_at(lo)) / width;
+
+    for (i, (_, value)) in signal.iter_changes().enumerate().skip(lo).take(hi - lo) {
+        if let Some(width) = bucket_width {
+            let first_in_bucket = i == lo || bucket(i - 1, width) != bucket(i, width);
+            let last_in_bucket = i + 1 == hi || bucket(i + 1, width) != bucket(i, width);
+            if !first_in_bucket && !last_in_bucket {
+                continue;
+            }
+        }
+        let value = value.to_string();
+        if value_changes.last().is_none_or(|(_, prev)| *prev != value) {
+            value_changes.push((time_at(i), value));
+        }
+    }
+    value_changes
+}
+
+const SIGNAL_CACHE_MAX_BYTES: usize = 1 << 30;
+
+fn load_cached(
+    cache: &mut HashMap<SignalRef, CachedSignal>,
+    refs: &[SignalRef],
+    source: &mut SignalSource,
+    hierarchy: &Hierarchy,
+    time_table: &[u64],
+) {
+    let missing: Vec<SignalRef> = refs.iter().copied().filter(|r| !cache.contains_key(r)).collect();
+    if missing.is_empty() {
+        return;
+    }
+    let cached_bytes: usize = cache.values().map(|c| c.signal.size_in_memory()).sum();
+    if cached_bytes > SIGNAL_CACHE_MAX_BYTES {
+        cache.retain(|r, _| refs.contains(r));
+    }
+    for signal in source.load_signals(&missing, hierarchy, true) {
+        let period = detect_period(&signal, time_table);
+        cache.insert(signal.signal_ref(), CachedSignal { signal, period });
+    }
+}
+
 fn cmd_get_signal_data(
     state: &mut AppState,
     signal_ids: &[u32],
     time_start: Option<u64>,
     time_end: Option<u64>,
+    max_points: Option<usize>,
     writer: &mut impl Write,
     request_id: u64,
 ) -> io::Result<()> {
@@ -470,62 +588,30 @@ fn cmd_get_signal_data(
         .map(|t| time_table.partition_point(|&x| x <= t))
         .unwrap_or(time_table.len());
 
-    let signal_refs: Vec<SignalRef> = signal_ids.iter()
+    let mut signal_refs: Vec<SignalRef> = signal_ids.iter()
         .filter_map(|id| SignalRef::from_index(*id as usize))
         .collect();
+    signal_refs.sort();
+    signal_refs.dedup();
 
     if signal_refs.is_empty() {
         return send_final(writer, request_id, rmpv::Value::Nil);
     }
 
-    let signals = signal_source.load_signals(&signal_refs, hierarchy, false);
-    let mut all_results: Vec<SignalDataResult> = Vec::new();
+    let cache = &mut state.signal_cache;
+    load_cached(cache, &signal_refs, signal_source, hierarchy, time_table);
 
-    for signal in &signals {
-        let sig_id = signal.signal_ref().index() as u32;
-        let time_indices = signal.time_indices();
-        let mut value_changes: Vec<(u64, String)> = Vec::new();
-        let mut initial_val: Option<String> = None;
+    let results: Vec<SignalDataResult> = signal_refs.iter()
+        .filter_map(|r| cache.get(r))
+        .map(|cached| SignalDataResult {
+            signal_id: cached.signal.signal_ref().index() as u32,
+            value_changes: signal_data(&cached.signal, time_table, time_start, start_idx, end_idx, max_points),
+            period: cached.period,
+        })
+        .collect();
 
-        for (i, (_tidx, value)) in signal.iter_changes().enumerate() {
-            let time_idx = if i < time_indices.len() { time_indices[i] as usize } else { 0 };
-            if time_idx < start_idx {
-                initial_val = Some(value.to_string());
-                continue;
-            }
-            if time_idx >= end_idx { break; }
-
-            let Some(&t) = time_table.get(time_idx) else { continue };
-            value_changes.push((t, value.to_string()));
-        }
-
-        if initial_val.is_none() {
-            if let Some(ts) = time_start {
-                if let Some(&first_tidx) = time_indices.first() {
-                    if let Some(&first_time) = time_table.get(first_tidx as usize) {
-                        if first_time > ts {
-                            initial_val = Some("x".to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        let prepend = time_start.zip(initial_val);
-        let value_changes: Vec<(u64, String)> = prepend
-            .into_iter()
-            .chain(value_changes)
-            .collect();
-
-        all_results.push(SignalDataResult {
-            signal_id: sig_id,
-            value_changes,
-        });
-    }
-
-    let chunk_size = 10;
-    for chunk in all_results.chunks(chunk_size) {
-        send_chunk(writer, request_id, to_value_or_nil(&chunk.to_vec()))?;
+    for chunk in results.chunks(10) {
+        send_chunk(writer, request_id, to_value_or_nil(&chunk))?;
     }
     send_final(writer, request_id, rmpv::Value::Nil)
 }
@@ -667,7 +753,7 @@ fn main() {
         let write_result = match req.cmd.as_str() {
             "get_signal_data" => {
                 let ids = req.signal_ids.unwrap_or_default();
-                cmd_get_signal_data(&mut state, &ids, req.time_start, req.time_end, &mut writer, request_id)
+                cmd_get_signal_data(&mut state, &ids, req.time_start, req.time_end, req.max_points, &mut writer, request_id)
             }
             "open" => match &req.file {
                 Some(f) => match cmd_open(&mut state, f) {
@@ -816,10 +902,60 @@ mod tests {
             start_index: None,
             time_start: None,
             time_end: None,
+            max_points: None,
         };
         let encoded = rmp_serde::to_vec_named(&req).unwrap();
         let decoded: Request = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded.cmd, "open");
         assert_eq!(decoded.file, Some("test.vcd".to_string()));
+    }
+
+    fn var_len_signal(values: &[&str], step: u64) -> (Signal, Vec<u64>) {
+        let n = values.len() as u32;
+        let time_table = (0..n as u64).map(|i| i * step).collect();
+        let values = values.iter().map(|v| v.to_string()).collect();
+        (Signal::new_var_len(SignalRef::from_index(0).unwrap(), (0..n).collect(), values), time_table)
+    }
+
+    fn toggling(n: usize) -> Vec<&'static str> {
+        (0..n).map(|i| if i % 2 == 0 { "0" } else { "1" }).collect()
+    }
+
+    #[test]
+    fn test_decimation_keeps_toggle_activity_for_any_bucket_width() {
+        let values = toggling(10_000);
+        let (signal, tt) = var_len_signal(&values, 10);
+        for max_points in [50, 64, 100, 128, 200, 1000] {
+            let vc = signal_data(&signal, &tt, None, 0, tt.len(), Some(max_points));
+            let ones = vc.iter().filter(|(_, v)| v == "1").count();
+            assert!(vc.len() <= max_points, "max_points={max_points}: {} entries", vc.len());
+            assert!(vc.len() >= max_points / 2, "max_points={max_points}: {} entries", vc.len());
+            assert!(ones.abs_diff(vc.len() - ones) <= 1, "max_points={max_points}: unbalanced");
+        }
+    }
+
+    #[test]
+    fn test_signal_data_window_prepends_value_in_effect() {
+        let (signal, tt) = var_len_signal(&toggling(10), 10);
+        let start_idx = tt.partition_point(|&t| t < 55);
+        let vc = signal_data(&signal, &tt, Some(55), start_idx, tt.len(), None);
+        assert_eq!(vc[0], (55, "1".to_string()));
+        assert_eq!(vc[1], (60, "0".to_string()));
+        assert_eq!(vc.len(), 5);
+    }
+
+    #[test]
+    fn test_signal_data_collapses_repeated_values() {
+        let (signal, tt) = var_len_signal(&["0", "0", "1", "1", "0"], 10);
+        let vc = signal_data(&signal, &tt, None, 0, tt.len(), None);
+        assert_eq!(vc, vec![(0, "0".to_string()), (20, "1".to_string()), (40, "0".to_string())]);
+    }
+
+    #[test]
+    fn test_detect_period_falls_back_to_min_gap() {
+        let (signal, tt) = var_len_signal(&toggling(4), 10);
+        assert_eq!(detect_period(&signal, &tt), Some(20));
+        let (short, tt) = var_len_signal(&toggling(2), 10);
+        assert_eq!(detect_period(&short, &tt), None);
     }
 }

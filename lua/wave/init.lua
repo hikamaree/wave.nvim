@@ -34,11 +34,14 @@ function M.setup(opts)
   config.setup(opts)
 
   local candidates = {
-    config.options.parser_binary,
+    vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":p:h:h:h") .. "/cmd/target/release/wave",
     vim.fn.stdpath("data") .. "/wave/wave",
     "wave",
-    vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":p:h:h:h") .. "/cmd/target/release/wave",
   }
+  if config.options.parser_binary then
+    table.insert(candidates, 1, config.options.parser_binary)
+  end
+
   local binary_path
   for _, path in ipairs(candidates) do
     if vim.fn.executable(path) ~= 0 then
