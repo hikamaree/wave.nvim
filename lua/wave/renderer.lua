@@ -3,6 +3,7 @@ local M = {}
 local ns = vim.api.nvim_create_namespace("wave_renderer")
 local EPS = 1e-12
 local MAX_MARKER_DIVISOR = 8
+local LABEL_GAP_COLS = 2
 
 ---@param c table
 ---@param key_prefix string
@@ -295,13 +296,16 @@ end
 ---@param col number
 ---@param edge_time number
 ---@param width number
-local function _ruler_place(nums, ticks, col, edge_time, width)
+---@param label_end number
+---@return number
+local function _ruler_place(nums, ticks, col, edge_time, width, label_end)
   ticks[col + 1] = "┃"
   local s = tostring(math.floor(edge_time))
+  if col < label_end + 1 or col + #s > width then return label_end end
   for j = 0, #s - 1 do
-    local c = col + 1 + j
-    if c <= width then nums[c] = s:sub(j + 1, j + 1) end
+    nums[col + 1 + j] = s:sub(j + 1, j + 1)
   end
+  return col + #s
 end
 
 ---@param time_start number
@@ -315,32 +319,36 @@ function M.render_ruler(time_start, time_end, width, value_changes)
   local ticks = {}
   for i = 1, width do nums[i] = " "; ticks[i] = " " end
 
-  if #value_changes > 0 and time_range > 0 then
+  if time_range > 0 then
     local col_vc_end = {}
-    local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
-
     local rise_cols = {}
-    for col = 0, width - 1 do
-      if col_val[col] == "0" and col_val[col + 1] == "1" then
-        table.insert(rise_cols, col)
+    if #value_changes > 0 then
+      local col_val = _build_col_val(value_changes, time_start, time_end, width, col_vc_end)
+      for col = 0, width - 1 do
+        if col_val[col] == "0" and col_val[col + 1] == "1" then
+          table.insert(rise_cols, col)
+        end
       end
     end
 
     ticks[1] = "┃"
 
+    local label_width = #tostring(math.floor(time_end)) + LABEL_GAP_COLS
+    local target = math.max(2, math.floor(width / math.max(MAX_MARKER_DIVISOR, label_width)))
+    local label_end = -1
+
     if #rise_cols >= 2 then
-      local target = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
       local step = math.ceil(#rise_cols / target)
       for idx = 1, #rise_cols, step do
         local col = rise_cols[idx]
         local edge_time = _find_first_rise_time(value_changes, col_vc_end[col], col_vc_end[col + 1])
-        _ruler_place(nums, ticks, col, edge_time or (time_start + (col + 1) * (time_range / width)), width)
+        edge_time = edge_time or (time_start + (col + 1) * (time_range / width))
+        label_end = _ruler_place(nums, ticks, col, edge_time, width, label_end)
       end
     else
-      local n = math.max(2, math.floor(width / MAX_MARKER_DIVISOR))
-      local step = math.floor(width / n)
+      local step = math.max(1, math.floor(width / target))
       for col = step, width - 1, step do
-        _ruler_place(nums, ticks, col, time_start + col * (time_range / width), width)
+        label_end = _ruler_place(nums, ticks, col, time_start + (col + 1) * (time_range / width), width, label_end)
       end
     end
   end

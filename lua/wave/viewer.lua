@@ -344,6 +344,32 @@ function M._detect_period()
   return period
 end
 
+--- Inverse of _update_viewport_from_zoom.
+---@param st ViewerState
+---@param period number
+---@return number
+local function _zoom_n_for_view(st, period)
+  local ww = _waveform_width()
+  local range = st.time_end - st.time_start
+  if range <= 0 or ww < MIN_WAVEFORM_WIDTH then return st.zoom_n end
+
+  local zoom = ww * period / range
+  if zoom >= 1.5 then
+    local n = math.floor(zoom + 0.5)
+    return n - n % 2
+  elseif zoom >= 0.75 then
+    return 1
+  end
+  return -math.max(2, math.floor(range / (ww * period) + 0.5))
+end
+
+function M._sync_zoom_to_view()
+  local st = _get_state()
+  local period = M._detect_period()
+  if not st or not period then return end
+  st.zoom_n = _zoom_n_for_view(st, period)
+end
+
 function M._update_viewport_from_zoom()
   local st = _get_state()
   if not st then return end
@@ -835,6 +861,7 @@ function M._render()
     local lines = {}
     local hlmarks = {}
     local cursor_col = _cursor_col(st, ww)
+    M._sync_zoom_to_view()
 
     table.insert(lines, _build_header(st))
     _add_ruler_rows(lines, st, ww, all_signals)

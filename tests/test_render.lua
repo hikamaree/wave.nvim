@@ -197,6 +197,48 @@ for _, t in ipairs(mb_tests) do
   total_g = total_g + #gl
 end
 
+local function check_ruler(vc_src, time_start, time_end, width, label)
+  local nums, ticks = renderer.render_ruler(time_start, time_end, width, vc_src)
+  local tick_chars = utf8_chars(ticks)
+  local ok = true
+  local prev_end = -1
+  for start, run in nums:gmatch("()(%d+)") do
+    if start <= prev_end + 1 then
+      print(string.format("RULER FAIL (%s): labels touch at col %d: %s", label, start, nums))
+      ok = false
+    end
+    if tick_chars[start] ~= "┃" then
+      print(string.format("RULER FAIL (%s): label %s at col %d has no tick", label, run, start))
+      ok = false
+    end
+    local col = renderer.time_to_col(tonumber(run), time_start, time_end - time_start, width)
+    if col ~= start - 1 then
+      print(string.format("RULER FAIL (%s): label %s sits at col %d but its time maps to %d", label, run, start - 1, col))
+      ok = false
+    end
+    prev_end = start + #run - 1
+  end
+  return ok
+end
+
+local shifted = {}
+for i, e in ipairs(vc) do shifted[i] = { e[1] + 10000000, e[2] } end
+local ruler_cases = {
+  { vc, 0, 620, 176, "small times, full range" },
+  { vc, 200, 260, 176, "small times, zoomed" },
+  { shifted, 10000000, 10000620, 176, "8-digit times, full range" },
+  { shifted, 10000200, 10000260, 176, "8-digit times, zoomed" },
+  { shifted, 10000000, 10000620, 60, "8-digit times, narrow" },
+  { { { 10000000, "0000" }, { 10000620, "1111" } }, 10000000, 10000620, 176, "no rising edges (bus only)" },
+  { {}, 10000000, 10000620, 176, "no data" },
+}
+for _, c in ipairs(ruler_cases) do
+  if not check_ruler(c[1], c[2], c[3], c[4], c[5]) then
+    all_ok = false
+    total_g = total_g + 1
+  end
+end
+
 local hex_cases = {
   { string.rep("1", 64), "0xFFFFFFFFFFFFFFFF" },
   { "1" .. string.rep("0", 52) .. "1", "0x20000000000001" },
