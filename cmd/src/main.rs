@@ -590,6 +590,7 @@ fn cmd_get_signal_data(
 
     let mut signal_refs: Vec<SignalRef> = signal_ids.iter()
         .filter_map(|id| SignalRef::from_index(*id as usize))
+        .filter(|r| hierarchy.get_signal_tpe(*r).is_some())
         .collect();
     signal_refs.sort();
     signal_refs.dedup();
@@ -680,9 +681,13 @@ fn cmd_search(state: &AppState, query: &str, scope_id: u32) -> Result<rmpv::Valu
         }
     }
 
+    let path_query = lower_query.contains('.');
+
     for (vref, var) in &var_pairs {
-        let name = var.name(hierarchy).to_string().to_lowercase();
-        if name.contains(&lower_query) {
+        let name = var.name(hierarchy).to_lowercase();
+        if name.contains(&lower_query)
+            || (path_query && var.full_name(hierarchy).to_lowercase().contains(&lower_query))
+        {
             let param_value = state.param_table.as_ref()
                 .and_then(|t| t.get(&(var.signal_ref().index() as u32)))
                 .cloned()

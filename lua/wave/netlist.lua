@@ -13,6 +13,7 @@ local _parser = nil
 local _states = {}
 ---@type number|nil
 local _netlist_buf = nil
+local _saved = nil
 
 local function _get_state()
   if not _netlist_buf then return nil end
@@ -21,19 +22,39 @@ end
 
 ---@return NetlistState
 local function _make_state(buf, win, scope_id, scope_name)
+  local restored = (_saved and _saved.current_scope_id == scope_id) and _saved or {}
   ---@type NetlistState
   local st = {
     buf = buf,
     win = win,
-    children_cache = {},
-    expanded_scopes = {},
+    children_cache = restored.children_cache or {},
+    expanded_scopes = restored.expanded_scopes or {},
     root_name = scope_name or tostring(scope_id),
     current_scope_id = scope_id,
     line_scope = {},
+    pending_view = restored.view,
   }
   _states[buf] = st
   _netlist_buf = buf
   return st
+end
+
+---@param st NetlistState|nil
+local function _save_state(st)
+  if not st then return end
+  if st.win and vim.api.nvim_win_is_valid(st.win) then
+    st.view = vim.api.nvim_win_call(st.win, vim.fn.winsaveview)
+  end
+  _saved = {
+    children_cache = st.children_cache,
+    expanded_scopes = st.expanded_scopes,
+    current_scope_id = st.current_scope_id,
+    view = st.view,
+  }
+end
+
+function M.reset()
+  _saved = nil
 end
 
 ---@param parser table
@@ -53,6 +74,7 @@ function M.close()
   if not buf then return end
   local st = _states[buf]
   if not st then return end
+  _save_state(st)
   -- Clear state before closing: the buffer is bufhidden=wipe, so nvim_win_close
   -- synchronously re-enters this via BufWipeout -> cleanup_buf.
   _states[buf] = nil
@@ -61,12 +83,14 @@ function M.close()
   if st.win and vim.api.nvim_win_is_valid(st.win) then
     vim.api.nvim_win_close(st.win, true)
   end
+  viewer._render()
 end
 
 ---@param buf number
 function M.cleanup_buf(buf)
   if _netlist_buf ~= buf then return end
   local st = _states[buf]
+  _save_state(st)
   -- Same reentrancy hazard as M.close (this is also the BufWipeout handler).
   _states[buf] = nil
   _netlist_buf = nil
@@ -74,6 +98,7 @@ function M.cleanup_buf(buf)
   if st and st.win and vim.api.nvim_win_is_valid(st.win) then
     pcall(vim.api.nvim_win_close, st.win, true)
   end
+  vim.schedule(function() viewer._render() end)
 end
 
 ---@param scope_id number|nil
@@ -103,8 +128,20 @@ function M.toggle(scope_id, scope_name)
   vim.wo[win].signcolumn = "no"
   vim.wo[win].foldenable = false
 
+  -- :q wipes the buffer before the close handler runs, so record it as it moves.
+  vim.api.nvim_create_autocmd({ "CursorMoved", "WinScrolled" }, {
+    buffer = buf,
+    callback = function()
+      local st = _states[buf]
+      if st and st.win and vim.api.nvim_win_is_valid(st.win) then
+        st.view = vim.api.nvim_win_call(st.win, vim.fn.winsaveview)
+      end
+    end,
+  })
+
   M._setup_keymaps()
   M._refresh_view()
+  viewer._render()
 end
 
 function M._setup_keymaps()
@@ -332,6 +369,13 @@ function M._refresh_view()
 
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
+
+    if st.pending_view then
+      local view = st.pending_view
+      st.pending_view = nil
+      view.lnum = math.min(view.lnum, #lines)
+      vim.api.nvim_win_call(st.win, function() vim.fn.winrestview(view) end)
+    end
   end)
   if not ok then
     vim.bo[buf].modifiable = false

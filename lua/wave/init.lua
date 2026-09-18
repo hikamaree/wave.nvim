@@ -18,6 +18,7 @@ local Parser = require("wave.parser")
 local viewer = require("wave.viewer")
 local netlist = require("wave.netlist")
 local search = require("wave.search")
+local signals = require("wave.signals")
 local download = require("wave.download")
 
 local M = {}
@@ -92,6 +93,10 @@ function M.open_file(filepath)
     return
   end
 
+  if abs_path ~= current_file then
+    signals.remove_all()
+    netlist.reset()
+  end
   current_file = abs_path
   viewer.open(abs_path)
 end

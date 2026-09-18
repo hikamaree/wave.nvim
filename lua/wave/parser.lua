@@ -6,6 +6,10 @@ Parser.__index = Parser
 
 local REQUEST_TIMEOUT_MS = 30000
 
+local function notify(msg, level)
+  vim.schedule(function() vim.notify(msg, level) end)
+end
+
 ---@param binary_path string
 ---@return Parser
 function Parser.new(_self, binary_path)
@@ -95,7 +99,7 @@ function Parser:start()
 
   self._stdout:read_start(function(err, data)
     if err then
-      vim.notify("[wave] stdout error: " .. tostring(err), vim.log.levels.ERROR)
+      notify("[wave] stdout error: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
     if not data then return end
@@ -108,7 +112,7 @@ function Parser:start()
     if err or not data then return end
     local msg = data:gsub("%s+$", "")
     if msg ~= "" then
-      vim.notify("[wave] " .. msg, vim.log.levels.WARN)
+      notify("[wave] " .. msg, vim.log.levels.WARN)
     end
   end)
 
@@ -129,10 +133,10 @@ function Parser:_process_buf()
     if ok then
       local ok2, err2 = pcall(self._handle_response, self, resp)
       if not ok2 then
-        vim.notify("[wave] Handler error: " .. tostring(err2), vim.log.levels.ERROR)
+        notify("[wave] Handler error: " .. tostring(err2), vim.log.levels.ERROR)
       end
     else
-      vim.notify("[wave] Failed to decode response: " .. tostring(resp), vim.log.levels.WARN)
+      notify("[wave] Failed to decode response: " .. tostring(resp), vim.log.levels.WARN)
     end
   end
 
