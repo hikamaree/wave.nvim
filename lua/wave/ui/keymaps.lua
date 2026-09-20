@@ -1,0 +1,26 @@
+--- Binds configured keys to handlers in a buffer.
+
+local M = {}
+
+--- `handlers` maps an action name to a function; `repeatable` names the
+--- actions that honour a count, so `5l` scrolls five steps.
+---@param buffer ScratchBuffer
+---@param keymaps table<string, string>
+---@param handlers table<string, fun()>
+---@param repeatable table<string, boolean>|nil
+function M.bind(buffer, keymaps, handlers, repeatable)
+  for action, lhs in pairs(keymaps) do
+    local handler = handlers[action]
+    if handler then
+      local counts = repeatable and repeatable[action]
+      vim.api.nvim_buf_set_keymap(buffer.handle, "n", lhs, "", {
+        callback = function()
+          for _ = 1, counts and vim.v.count1 or 1 do handler() end
+        end,
+        noremap = true, silent = true, desc = "wave: " .. action,
+      })
+    end
+  end
+end
+
+return M

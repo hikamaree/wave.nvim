@@ -1,0 +1,50 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Neovim embeds LuaJIT, so the pure-layer tests run on the same
+      # interpreter the plugin itself does.
+      - name: Install LuaJIT and luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit lua5.1 luarocks
+          sudo luarocks install luacheck
+          luajit -v
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cmd/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('cmd/Cargo.lock') }}
+
+      - name: Build the parser
+        run: make build
+
+      - name: Architecture checks
+        run: make purity
+
+      - name: Lint
+        run: luacheck lua/ plugin/
+
+      - name: Tests
+        run: make test
