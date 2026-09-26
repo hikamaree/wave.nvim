@@ -1,35 +1,28 @@
 --- Paints the expanded view of a bus: one row per value change in view.
 
 local ValueFormat = require("wave.render.value_format")
+local ValueChanges = require("wave.model.value_changes")
 
 local M = {}
 
---- The fetched data covers a wider window than the viewport, so the table is
---- restricted to what is actually on screen.
----@param signal table|nil
----@param t0 number|nil
----@param t1 number|nil
----@return table[]
-local function visible_changes(signal, t0, t1)
-  local out = {}
-  for _, vc in ipairs(signal and signal.value_changes or {}) do
-    local t = tonumber(vc[1])
-    if not t0 or (t and t >= t0 and t <= t1) then
-      out[#out + 1] = vc
-    end
-  end
-  return out
+--- Fetched data is wider than the viewport, so restrict to what is shown.
+---@return number first, number last
+local function visible_range(signal, t0, t1)
+  local vc = signal and signal.value_changes
+  if not vc or #vc == 0 then return 1, 0 end
+  return ValueChanges.range(vc, t0, t1)
 end
 
---- Row count paint() will produce, so callers can lay out around it.
+--- Row count paint() will produce, for callers laying out around it.
 ---@param signal table|nil
 ---@param max_rows number|nil
 ---@param t0 number|nil
 ---@param t1 number|nil
 ---@return number
 function M.row_count(signal, max_rows, t0, t1)
-  local total = #visible_changes(signal, t0, t1)
-  if total == 0 then return 1 end
+  local first, last = visible_range(signal, t0, t1)
+  local total = last - first + 1
+  if total <= 0 then return 1 end
   local count = max_rows and math.min(total, max_rows) or total
   return count < total and count + 1 or count
 end
@@ -42,18 +35,18 @@ end
 ---@return string[]
 function M.paint(signal, label_width, max_rows, t0, t1)
   local pad = string.rep(" ", label_width)
-  local visible = visible_changes(signal, t0, t1)
-  local total = #visible
+  local first, last = visible_range(signal, t0, t1)
+  local total = last - first + 1
 
-  if total == 0 then
+  if total <= 0 then
     return { pad .. "  (no data in view)" }
   end
 
   local lines = {}
   local count = max_rows and math.min(total, max_rows) or total
-  for i = 1, count do
-    local vc = visible[i]
-    lines[#lines + 1] = pad .. string.format("    @%-12s %s", vc[1], ValueFormat.hex(vc[2]))
+  local vc = signal.value_changes
+  for i = first, first + count - 1 do
+    lines[#lines + 1] = pad .. string.format("    @%-12s %s", vc[i][1], ValueFormat.hex(vc[i][2]))
   end
   if count < total then
     lines[#lines + 1] = pad .. string.format("    … %d more in view", total - count)

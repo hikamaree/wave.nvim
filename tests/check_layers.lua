@@ -8,8 +8,7 @@
 
 local ROOT = "lua/wave"
 
--- Higher number = further from the core. A module may only require its own
--- layer or a lower one.
+-- A module may only require its own layer or a lower one.
 local DIRECTORY_LAYER = {
   util = 0,     -- logging
   model = 1,    -- pure state and math

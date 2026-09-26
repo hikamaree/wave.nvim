@@ -1,7 +1,5 @@
---- Paints the time ruler: a tick row and a row of time labels above it.
----
---- When a reference clock is available the ticks land on its rising edges, so
---- the labels read as cycle boundaries rather than arbitrary column offsets.
+--- The time ruler: a tick row and its labels. Ticks land on the reference
+--- clock's rising edges, so labels read as cycle boundaries.
 
 local Sampler = require("wave.render.sampler")
 
@@ -10,8 +8,8 @@ local M = {}
 local MAX_MARKER_DIVISOR = 8
 local LABEL_GAP_COLS = 2
 
---- Time of the first rise within a column's span. An intermediate x/z must not
---- hide the edge, so this looks for the "1" rather than a 0->1 pair.
+--- First rise in a column's span. Looks for the "1" rather than a 0->1
+--- pair, so an intermediate x/z cannot hide the edge.
 ---@param value_changes table
 ---@param from_idx number
 ---@param to_idx number
@@ -25,8 +23,7 @@ local function first_rise_time(value_changes, from_idx, to_idx)
   return nil
 end
 
---- Writes a tick at `col` and its label, unless the label would collide with
---- the previous one or run past the right edge.
+--- Tick at `col`, labelled unless it would collide or overrun.
 ---@return number the column the written label ends at
 local function place(nums, ticks, col, edge_time, width, label_end)
   ticks[col + 1] = "┃"

@@ -6,14 +6,14 @@ HEADLESS := $(NVIM) --headless -u NONE -l
 # pass locally and then fail elsewhere.
 LUA ?= $(shell command -v luajit 2>/dev/null || command -v lua5.1 2>/dev/null || echo lua)
 
-.PHONY: all build test syntax test-model test-render test-ipc test-integration test-netlist test-app golden golden-update purity lint clean
+.PHONY: all build test syntax test-model test-render test-ipc test-integration test-netlist test-app test-mouse golden golden-update purity lint clean
 
 all: build test
 
 build:
 	cd cmd && cargo build --release
 
-test: syntax test-model test-render test-ipc test-integration test-netlist test-app golden
+test: syntax test-model test-render test-ipc test-integration test-netlist test-app test-mouse golden
 
 # The model layer is pure, so it runs without Neovim.
 test-model:
@@ -39,6 +39,11 @@ test-netlist:
 test-app:
 	@echo "== app =="
 	@$(HEADLESS) tests/test_app.lua
+
+# Mouse events need a running event loop, so this one cannot use -l.
+test-mouse:
+	@echo "== mouse =="
+	@$(NVIM) --headless -u tests/test_mouse.lua < /dev/null
 
 golden:
 	@echo "== golden =="

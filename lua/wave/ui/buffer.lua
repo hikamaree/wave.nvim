@@ -1,5 +1,4 @@
---- A scratch buffer for plugin output: created unlisted and wiped on hide,
---- never modifiable except while it is being written.
+--- A scratch buffer: unlisted, wiped on hide, writable only while written.
 
 local ScratchBuffer = {}
 ScratchBuffer.__index = ScratchBuffer
@@ -38,7 +37,7 @@ function ScratchBuffer:valid()
   return self.handle ~= nil and vim.api.nvim_buf_is_valid(self.handle)
 end
 
---- Runs `fn` with the buffer writable, restoring it even if `fn` throws.
+--- Restores the flag even if `fn` throws.
 ---@param fn fun()
 ---@return boolean ok, string|nil err
 function ScratchBuffer:with_modifiable(fn)

@@ -1,23 +1,16 @@
 --- The visible time window, and every rule for moving it.
 ---
---- zoom_n is a ladder rather than a factor: n >= 2 means n columns per clock
---- period, n == 1 means one column per period, and n <= -2 means one column
---- per |n| periods. Keeping it discrete is what makes the waveform snap to
---- whole cycles instead of drifting to fractional column widths.
+--- zoom_n is a discrete ladder, which is what snaps the waveform to whole
+--- cycles: n >= 2 is n columns per period, 1 is one column per period, and
+--- n <= -2 is one column per |n| periods.
 
 local Viewport = {}
 Viewport.__index = Viewport
 
--- A little headroom past the end of the file, so the last edge is not flush
--- against the right border.
-local ZOOM_OUT_MARGIN = 1.05
--- Below this the zoom arithmetic has no room to mean anything.
-local MIN_COLS = 20
--- Clamping must not silently shrink the span; past this it is repositioned.
-local SHRINK_THRESHOLD = 0.5
--- Beyond this the ladder doubles instead of stepping, so zooming out of a
--- long trace does not take dozens of presses.
-local LINEAR_LIMIT = -8
+local ZOOM_OUT_MARGIN = 1.05  -- headroom past the file end
+local MIN_COLS = 20           -- below this the zoom arithmetic is meaningless
+local SHRINK_THRESHOLD = 0.5  -- clamp may shrink this far before repositioning
+local LINEAR_LIMIT = -8       -- past this the ladder doubles instead of stepping
 local PAN_FRACTION = 0.1
 
 ---@param file_end number
@@ -41,13 +34,12 @@ function Viewport:center()
   return (self.t0 + self.t1) / 2
 end
 
---- The furthest right the view may extend.
 ---@return number
 function Viewport:max_time()
   return (self.file_end or math.huge) * ZOOM_OUT_MARGIN
 end
 
---- Columns per period for the current rung of the ladder.
+--- Columns per period at the current rung.
 ---@return number
 function Viewport:zoom_value()
   if self.zoom_n >= 2 then return self.zoom_n end
@@ -55,7 +47,6 @@ function Viewport:zoom_value()
   return -1.0 / self.zoom_n
 end
 
---- How the zoom factor is shown in the header.
 ---@return string
 function Viewport:zoom_label()
   local z = self:zoom_value()
@@ -71,12 +62,12 @@ function Viewport:clamp()
   end
 end
 
---- Slides the window one step. Each direction clamps against the boundary it
---- is moving toward, so panning into an edge stops rather than shrinking.
+--- Clamps against the boundary it moves toward, so an edge stops the pan.
 ---@param direction number -1 left, +1 right
-function Viewport:pan(direction)
+---@param steps number|nil
+function Viewport:pan(direction, steps)
   local range = self:range()
-  local step = range * PAN_FRACTION
+  local step = range * PAN_FRACTION * (steps or 1)
   if direction < 0 then
     self.t0 = math.max(0, self.t0 - step)
     self.t1 = self.t0 + range
@@ -87,7 +78,7 @@ function Viewport:pan(direction)
   self:clamp()
 end
 
---- Keeps a marker on screen by sliding the view, without changing its span.
+--- Slides the view to keep `t` on screen, without changing the span.
 ---@param t number
 function Viewport:follow(t)
   local range = self:range()
@@ -101,7 +92,7 @@ function Viewport:follow(t)
   end
 end
 
---- Zoom with no known period: scale the span around its centre.
+--- Fallback when no period is known.
 ---@param factor number
 ---@return boolean changed
 function Viewport:scale_by(factor)
@@ -114,8 +105,7 @@ function Viewport:scale_by(factor)
   return true
 end
 
---- Recomputes the span from the current rung, keeping the cursor centred
---- when it is on screen and the view's centre otherwise.
+--- Recomputes the span from the current rung, around the cursor if visible.
 ---@param period number
 ---@param cols number
 ---@param cursor_time number|nil
@@ -139,9 +129,7 @@ function Viewport:apply_zoom(period, cols, cursor_time)
   end
 end
 
---- Pulls zoom_n back into agreement after the span was changed directly, so
---- the header and the next zoom step start from what is actually on screen.
---- The inverse of apply_zoom.
+--- Inverse of apply_zoom: recovers the rung after a direct span change.
 ---@param period number
 ---@param cols number
 function Viewport:sync_zoom(period, cols)
@@ -186,7 +174,7 @@ function Viewport:zoom_in(period, cols, cursor_time)
     self.zoom_n = next_n
     local new_range = cols * period / self:zoom_value()
     self.zoom_n = saved
-    -- Already as tight as a two-period span: stop rather than go finer.
+    -- Already down to two periods.
     if new_range < period * 2 and self:range() <= period * 2 then return false end
   end
 

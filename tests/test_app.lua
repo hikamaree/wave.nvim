@@ -1,5 +1,4 @@
--- App-level command tests: the entry points plugin/wave.lua and the user
--- commands drive. Covers the Session lifecycle introduced in phase 7.
+-- App-level command tests: the entry points the user commands drive.
 --   nvim --headless -u NONE -l tests/test_app.lua
 
 package.path = package.path .. ";./lua/?.lua;./lua/?/init.lua"
@@ -42,6 +41,162 @@ check("session knows its path", session and session.path:match("random_counter%.
 check("file name set", session and session.file_name == "random_counter.vcd")
 check("viewer open", session and session:viewer_open())
 check("viewport spans the file", session and session.viewport.file_end > 0)
+
+print("\n--- the viewer appears before parsing finishes ---")
+do
+  -- Opening must not wait on the parser.
+  wave.close_all()
+  require("wave.app").stop()
+  wave.setup({})
+
+  wave.open_file(OTHER)
+  local immediate = wave.session()
+  check("session exists with no wait", immediate ~= nil)
+  if immediate then
+    check("viewer window is already up", immediate:viewer_open())
+    -- These samples are small, so accept either state.
+    local layout = immediate:build_layout(80, 24)
+    local body = ""
+    for _, row in ipairs(layout.rows) do body = body .. row.text .. "\n" end
+    if immediate.loading then
+      check("loading screen shown while parsing", body:match("Parsing waveform") ~= nil, body)
+    else
+      check("parsed already, real viewer shown", body:match("Parsing waveform") == nil)
+    end
+  end
+
+  settle(2500)
+  local done = wave.session()
+  check("loading clears once parsed", done and done.loading == false)
+  check("spinner timer stopped", done and done.spinner_timer == nil)
+  check("viewport adopted from the file", done and done.viewport.file_end > 0)
+end
+
+print("\n--- viewer keys are inert while parsing ---")
+do
+  local Session = require("wave.session")
+  local Actions = require("wave.actions")
+  local Client = require("wave.ipc.client")
+  local client = Client.new("cmd/target/release/wave")
+  client:start()
+
+  local loading = Session.new(client, "/tmp/never-parsed.vcd")
+  loading:show_viewer()
+  local handlers = Actions.handlers(loading)
+
+  -- The placeholder spans 0..1050; acting on it strands a cursor past the end.
+  handlers.cursor()
+  handlers.zoom_in()
+  handlers.scroll_right()
+  handlers.next_edge()
+  check("no cursor placed while parsing", loading.cursor_time == nil)
+  check("zoom untouched while parsing", loading.viewport.zoom_n == -2)
+
+  loading:loaded({ time_end = 200, time_unit = "ns" })
+  check("cursor still unset after parse", loading.cursor_time == nil)
+  check("viewport came from the file", loading.viewport.t1 == 210, loading.viewport.t1)
+
+  -- close and help must keep working on the loading screen.
+  local other = Session.new(client, "/tmp/also-never.vcd")
+  other:show_viewer()
+  Actions.handlers(other).close()
+  check("close works while parsing", not other:viewer_open())
+
+  loading:close()
+  other:close()
+  client:stop()
+end
+
+print("\n--- cursor and scroll are safe on the loading screen ---")
+do
+  -- Opening a slow file put the loading screen up, and the first cursor
+  -- movement crashed in CursorMoved: the loading layout had no body_first.
+  local Session = require("wave.session")
+  local Client = require("wave.ipc.client")
+  local client = Client.new("cmd/target/release/wave")
+  client:start()
+
+  local parsing = Session.new(client, "/tmp/still-parsing.vcd")
+  parsing:show_viewer()
+  check("the loading screen is up", parsing.loading and parsing:viewer_open())
+
+  for _, case in ipairs({
+    { "clamp_cursor", function() return parsing:clamp_cursor(1) end },
+    { "move_cursor down", function() parsing:move_cursor(1) end },
+    { "move_cursor up", function() parsing:move_cursor(-1) end },
+    { "scroll_signals", function() parsing:scroll_signals(3) end },
+    { "scroll to the end", function() parsing:scroll_extreme(true) end },
+    { "scroll to the top", function() parsing:scroll_extreme(false) end },
+    { "trace under the cursor", function() return parsing.viewer:under_cursor() end },
+    { "click", function() parsing:mouse_click({ line = 3, wincol = 40 }) end },
+    { "drag", function() parsing:mouse_drag({ line = 3, wincol = 40 }) end },
+    { "double click", function() parsing:mouse_double_click({ line = 3, wincol = 40 }) end },
+    { "ctrl-wheel zoom", function() parsing:mouse_zoom(true, { line = 3, wincol = 40 }) end },
+    { "render", function() parsing:render() end },
+  }) do
+    local ok, err = pcall(case[2])
+    check("loading screen survives " .. case[1], ok, err)
+  end
+
+  check("nothing was selected while parsing", parsing.cursor_time == nil)
+  parsing:close()
+  client:stop()
+end
+
+print("\n--- the spinner stops when there is nothing to animate ---")
+do
+  -- Never finishes loading, so the spinner lifecycle stays observable.
+  local Session = require("wave.session")
+  local Client = require("wave.ipc.client")
+  local client = Client.new("cmd/target/release/wave")
+  check("probe client starts", client:start())
+
+  local stuck = Session.new(client, "/tmp/never-parsed.vcd")
+  stuck:show_viewer()
+  settle(250)
+  check("spinner runs while visible", stuck.spinner_frame > 0, stuck.spinner_frame)
+
+  -- Closing mid-parse must not leave the timer firing against a dead window.
+  stuck:hide_viewer()
+  settle(300)
+  check("timer released when the viewer closes", stuck.spinner_timer == nil)
+  local frozen = stuck.spinner_frame
+  settle(250)
+  check("no work while hidden", stuck.spinner_frame == frozen, stuck.spinner_frame)
+
+  -- Reopening before the parse finishes resumes it.
+  stuck:show_viewer()
+  settle(300)
+  check("spinner resumes on reopen", stuck.spinner_frame > frozen)
+
+  stuck:close()
+  check("timer released on close", stuck.spinner_timer == nil)
+  client:stop()
+end
+
+print("\n--- a file that cannot be opened leaves no stuck session ---")
+do
+  -- Missing file: rejected before a session or window is ever made.
+  wave.close_all()
+  require("wave.app").stop()
+  wave.setup({})
+  wave.open_file("tests/samples/nope.vcd")
+  settle(500)
+  check("no session for a missing file", wave.session() == nil)
+
+  -- Readable but not a waveform: the window is already up when it fails.
+  local before_buf = vim.api.nvim_get_current_buf()
+  wave.open_file("tests/samples/not_a_waveform.vcd")
+  check("window opened before the parse failed", wave.session() ~= nil)
+  settle(2500)
+  check("no session after the parser rejects it", wave.session() == nil)
+  check("returned to the previous buffer", vim.api.nvim_get_current_buf() == before_buf)
+  check("landed somewhere usable", vim.bo[vim.api.nvim_get_current_buf()].modifiable)
+end
+
+wave.open_file(SAMPLE)
+settle(2000)
+session = wave.session()
 
 print("\n--- missing file is reported, not fatal ---")
 wave.open_file("tests/samples/does_not_exist.vcd")
@@ -136,6 +291,229 @@ local ok = pcall(function()
   wave.search_netlist()
 end)
 check("no errors without a session", ok)
+
+print("\n--- scrolling keeps the chrome in place ---")
+do
+  wave.close_all()
+  require("wave.app").stop()
+  wave.setup({})
+  wave.open_file(SAMPLE)
+  settle(2000)
+  local sess = wave.session()
+  for i = 0, 15 do
+    sess:add_trace(SignalRef.new({ signal_id = 100 + i, path = "tb.s" .. i, width = 1 }))
+  end
+  settle(1500)
+
+  local win = sess:viewer_window()
+  local function lines()
+    return vim.api.nvim_buf_get_lines(win:buffer(), 0, -1, false)
+  end
+
+  check("buffer matches the window height", #lines() == win:height(),
+    #lines() .. " vs " .. win:height())
+  check("there is more to scroll than fits", sess.viewer.layout.max_offset > 0,
+    sess.viewer.layout.max_offset)
+
+  local header = lines()[1]
+  local keybar = lines()[#lines()]
+  check("header names the file", header:match("random_counter") ~= nil)
+  check("key bar is the last line", keybar:match("q:close") ~= nil)
+
+  -- Scroll through every position; the chrome must never move, and every one
+  -- must start on a whole signal.
+  local moved_body = false
+  local partial = 0
+  local first_body = lines()[5]
+  for _ = 1, 200 do
+    if not sess:scroll_signals(1) then break end
+    if sess.viewer.layout.rows[sess.viewer.layout.body_first].kind ~= "wave_top" then
+      partial = partial + 1
+    end
+    local L = lines()
+    if L[1] ~= header or L[#L] ~= keybar or #L ~= win:height() then
+      check("chrome stayed put at offset " .. sess.row_offset, false)
+      break
+    end
+    if L[5] ~= first_body then moved_body = true end
+  end
+  check("chrome survived every scroll position", lines()[1] == header
+    and lines()[#lines()] == keybar)
+  check("the body actually scrolled", moved_body)
+  check("no scroll position starts mid-signal", partial == 0, partial)
+
+  sess:scroll_extreme(true)
+  check("cannot scroll past the end", sess:scroll_signals(1) == false)
+  sess:scroll_extreme(false)
+  check("jump to top", sess.row_offset == 0)
+  sess:scroll_extreme(true)
+  check("jump to bottom", sess.row_offset == sess.viewer.layout.max_offset)
+
+  -- Clicking snaps to a transition inside the clicked column, so an edge can
+  -- be selected exactly even when a column spans many time units.
+  sess.row_offset = 0
+  sess:render()
+  local edges = sess.traces:edge_index()
+  if edges:count() > 0 then
+    local snapped = 0
+    for col = 4, 24 do
+      local t = sess:time_under(sess.viewer.layout.cursor_offset + col)
+      if t and edges:floor(t) == t then snapped = snapped + 1 end
+    end
+    check("clicks snap onto transitions", snapped > 0, snapped)
+  end
+
+  -- The cursor is held inside the body, off the header and key bar.
+  sess.row_offset = 0
+  sess:render()
+  local body_first = sess.viewer.layout.body_first
+  local body_last = sess.viewer.layout.body_last
+  check("cursor off the header", sess:clamp_cursor(1) == body_first)
+  check("cursor off the key bar", sess:clamp_cursor(#lines()) == body_last)
+  check("cursor left alone inside the body", sess:clamp_cursor(body_first + 1) == body_first + 1)
+end
+
+print("\n--- a count on j travels as far as the presses would ---")
+do
+  wave.close_all()
+  require("wave.app").stop()
+  wave.setup({})
+  wave.open_file(SAMPLE)
+  settle(2000)
+  local sess = wave.session()
+  for i = 0, 15 do
+    sess:add_trace(SignalRef.new({ signal_id = 400 + i, path = "tb.c" .. i, width = 1 }))
+  end
+  settle(1500)
+
+  local layout = sess.viewer.layout
+  check("there is more than one screenful", layout.max_offset > 0, layout.max_offset)
+
+  -- A count must not collapse to a single step: this reached one signal when
+  -- move_cursor stopped tracking how far past the edge the count went.
+  sess.row_offset = 0
+  sess:render()
+  sess.viewer:place_cursor(sess.viewer.layout.body_first)
+  sess:move_cursor(200)
+  check("a big count reaches the end", sess.row_offset == sess.viewer.layout.max_offset,
+    sess.row_offset .. " of " .. sess.viewer.layout.max_offset)
+
+  sess:move_cursor(-200)
+  check("and comes all the way back", sess.row_offset == 0, sess.row_offset)
+
+  -- A count that fits inside the body must move the cursor without scrolling.
+  local body_first = sess.viewer.layout.body_first
+  sess.viewer:place_cursor(body_first)
+  sess:move_cursor(2)
+  check("a small count moves the cursor", sess.viewer.window:cursor_line() == body_first + 2,
+    sess.viewer.window:cursor_line())
+  check("a small count does not scroll", sess.row_offset == 0, sess.row_offset)
+
+  -- Stepping off the top at the very top must stay put.
+  sess.viewer:place_cursor(body_first)
+  sess:move_cursor(-5)
+  check("cannot step above the first signal", sess.row_offset == 0
+    and sess.viewer.window:cursor_line() == body_first)
+end
+
+print("\n--- mouse gestures ---")
+do
+  wave.close_all()
+  require("wave.app").stop()
+  wave.setup({})
+  wave.open_file(SAMPLE)
+  settle(2000)
+  local sess = wave.session()
+  for i = 0, 11 do
+    sess:add_trace(SignalRef.new({ signal_id = 700 + i, path = "tb.m" .. i, width = 8 }))
+  end
+  settle(1500)
+
+  local layout = sess.viewer.layout
+  local gutter = layout.cursor_offset
+  local body_first, body_last = layout.body_first, layout.body_last
+
+  -- Clicking the waveform drops the time cursor and selects the row.
+  sess:mouse_click({ line = body_first + 1, wincol = gutter + 8 })
+  local first_time = sess.cursor_time
+  check("click sets the time cursor", first_time ~= nil)
+  check("click selects the row", sess.viewer.window:cursor_line() == body_first + 1,
+    sess.viewer.window:cursor_line())
+
+  sess:mouse_click({ line = body_first + 1, wincol = gutter + 30 })
+  check("clicking further right reads later", sess.cursor_time > first_time,
+    tostring(sess.cursor_time) .. " vs " .. tostring(first_time))
+
+  -- Clicking the label gutter selects without moving the time cursor.
+  local held = sess.cursor_time
+  sess:mouse_click({ line = body_first + 4, wincol = 2 })
+  check("label click leaves the time alone", sess.cursor_time == held)
+  check("label click still selects", sess.viewer.window:cursor_line() == body_first + 4)
+
+  -- The chrome is not selectable.
+  sess:mouse_click({ line = 1, wincol = gutter + 5 })
+  check("click on the header clamps into the body",
+    sess.viewer.window:cursor_line() == body_first, sess.viewer.window:cursor_line())
+  sess:mouse_click({ line = body_last + 2, wincol = gutter + 5 })
+  check("click on the key bar clamps into the body",
+    sess.viewer.window:cursor_line() == body_last, sess.viewer.window:cursor_line())
+
+  -- Dragging scrubs the time without changing the selected row.
+  sess:mouse_click({ line = body_first + 2, wincol = gutter + 5 })
+  local row = sess.viewer.window:cursor_line()
+  sess:mouse_drag({ line = body_last, wincol = gutter + 40 })
+  check("drag moves the time cursor", sess.cursor_time ~= nil)
+  check("drag keeps the selected row", sess.viewer.window:cursor_line() == row)
+
+  -- Wheel scrolls the list; the chrome stays pinned.
+  sess.row_offset = 0
+  sess:render()
+  local head = vim.api.nvim_buf_get_lines(sess.viewer.buffer.handle, 0, 1, false)[1]
+  sess:scroll_signals(3)
+  check("wheel scrolls the body", sess.row_offset > 0, sess.row_offset)
+  -- Scrolling counts signals, so it lands on a stop, never mid-signal.
+  check("scrolling lands on a stop",
+    sess.viewer.layout:next_stop(sess.row_offset - 1) == sess.row_offset
+      or sess.row_offset == 0, sess.row_offset)
+  check("the top row is a whole signal",
+    sess.viewer.layout.rows[sess.viewer.layout.body_first].kind == "wave_top",
+    sess.viewer.layout.rows[sess.viewer.layout.body_first].kind)
+  check("wheel leaves the header alone",
+    vim.api.nvim_buf_get_lines(sess.viewer.buffer.handle, 0, 1, false)[1] == head)
+
+  -- Ctrl-wheel zooms about the pointer.
+  local span = sess.viewport:range()
+  sess:mouse_zoom(true, { line = body_first, wincol = gutter + 20 })
+  check("ctrl-wheel zooms in", sess.viewport:range() < span,
+    sess.viewport:range() .. " vs " .. span)
+  local zoomed = sess.viewport:range()
+  sess:mouse_zoom(false, { line = body_first, wincol = gutter + 20 })
+  check("ctrl-wheel zooms out", sess.viewport:range() > zoomed)
+
+  -- Double-clicking a bus expands it.
+  sess.row_offset = 0
+  sess:render()
+  local trace = sess.viewer.layout:at(body_first)
+  check("a bus is under the pointer", trace ~= nil and trace.ref:is_multi_bit())
+  if trace then
+    local was = trace.expanded
+    sess:mouse_double_click({ line = body_first, wincol = 5 })
+    check("double click expands the bus", trace.expanded ~= was)
+  end
+
+  -- Nothing may act on a pointer outside the window, or while parsing.
+  local ok = pcall(function()
+    sess:mouse_click(nil); sess:mouse_drag(nil); sess:mouse_double_click(nil)
+    sess:mouse_zoom(true, nil)
+  end)
+  check("a pointer outside the window is ignored", ok)
+
+  sess.loading = true
+  local frozen = sess.cursor_time
+  sess:mouse_click({ line = body_first, wincol = gutter + 50 })
+  check("clicks do nothing while parsing", sess.cursor_time == frozen)
+  sess.loading = false
+end
 
 print("\n--- Actions registry ---")
 do

@@ -16,9 +16,8 @@ function FrameReader:reset()
   self.len = 0
 end
 
---- Feeds received bytes and emits every complete frame they finish.
---- A length past MAX_FRAME_LEN means the stream is no longer frame-aligned
---- and cannot be recovered by reading further.
+--- Emits every complete frame the new bytes finish. A length past
+--- MAX_FRAME_LEN means the stream is unrecoverably out of alignment.
 ---@param data string
 ---@return boolean ok, string|nil err
 function FrameReader:feed(data)

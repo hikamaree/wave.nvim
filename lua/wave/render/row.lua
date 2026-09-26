@@ -1,8 +1,5 @@
---- One rendered buffer line, carrying what produced it.
----
---- The owner is the point: a row knows which trace or node it came from, so
---- "what is under the cursor" is a lookup rather than a second traversal of
---- the layout arithmetic that can disagree with what was drawn.
+--- One rendered buffer line. It carries its owner, so "what is under the
+--- cursor" is a lookup rather than a second pass over the layout arithmetic.
 
 local Row = {}
 Row.__index = Row
@@ -21,7 +18,7 @@ function Row.new(text, kind, owner)
   }, Row)
 end
 
---- Adds a highlight span. Columns are byte offsets, as extmarks want.
+--- Byte offsets, as extmarks want.
 ---@param group string
 ---@param from number
 ---@param to number
@@ -33,7 +30,6 @@ function Row:hl(group, from, to)
   return self
 end
 
---- Marks this row as one the time cursor is drawn through.
 ---@return Row
 function Row:track_cursor()
   self.cursor_track = true

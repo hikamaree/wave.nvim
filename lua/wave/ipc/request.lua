@@ -1,8 +1,5 @@
---- One in-flight request: its callback, its accumulated chunks, and its own
---- timeout timer.
----
---- Keeping the three together is what lets a chunked response refresh its
---- deadline with the same code that set it, rather than a second copy.
+--- One in-flight request: its callback, chunks and timeout timer. Keeping
+--- them together lets a chunked response refresh its own deadline.
 
 local log = require("wave.util.log")
 
@@ -16,7 +13,7 @@ function Request.new(id, callback)
   return setmetatable({ id = id, callback = callback, chunks = {}, timer = nil, done = false }, Request)
 end
 
---- Starts, or restarts, the deadline.
+--- Starts or restarts the deadline.
 ---@param timeout_ms number
 ---@param on_timeout fun(request: Request)
 function Request:arm(timeout_ms, on_timeout)
@@ -46,8 +43,7 @@ function Request:push_chunk(data)
   self.chunks[#self.chunks + 1] = data
 end
 
---- Chunked payloads arrive as a series of partial data arrays; the final
---- frame's own data was produced last, so it belongs after the chunks.
+--- The final frame's data was produced last, so it goes after the chunks.
 ---@param response table
 function Request:merge_chunks(response)
   if #self.chunks == 0 then return end
@@ -94,8 +90,7 @@ function Request:reject(reason)
   end)
 end
 
---- Drops the request without calling back: used when the owner is tearing
---- down and has already reported the failure.
+--- Drops it without calling back; the owner has already reported the failure.
 function Request:cancel()
   self.done = true
   self:stop_timer()

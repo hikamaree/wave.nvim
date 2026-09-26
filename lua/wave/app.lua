@@ -1,5 +1,4 @@
---- Plugin-wide state: the configuration, the parser process, and the session
---- for the file currently open.
+--- Plugin-wide state: configuration, parser process, current session.
 
 local ParserClient = require("wave.ipc.client")
 local Session = require("wave.session")
@@ -70,17 +69,27 @@ function M.open_file(filepath)
     _session = nil
   end
 
+  -- Show the window before the parse, so a large file does not look hung.
+  local session = Session.new(_client, path)
+  _session = session
+  session:show_viewer()
+
   _client:open(path, function(resp)
-    if not resp.success then
-      log.error("Failed to open: " .. (resp.error or "unknown"))
-      return
-    end
-    local info = resp.data
     vim.schedule(function()
-      _session = Session.new(_client, path, info)
-      log.info("Loaded: " .. _session.file_name
+      -- Another file may have been opened while this one was parsing.
+      if _session ~= session then return end
+
+      if not resp.success then
+        log.error("Failed to open: " .. (resp.error or "unknown"))
+        session:close()
+        _session = nil
+        return
+      end
+
+      local info = resp.data
+      session:loaded(info)
+      log.info("Loaded: " .. session.file_name
         .. " (" .. info.format .. ", " .. info.var_count .. " signals)")
-      _session:show_viewer()
     end)
   end)
 end
@@ -115,11 +124,10 @@ function M.search_netlist()
   _session:prompt_add_trace()
 end
 
---- Runs an action, by id, against the current session.
 ---@param id string
 function M.invoke(id)
   local action = Actions.by_id(id)
-  if action and _session then action.run(_session) end
+  if action and _session then Actions.invoke(action, _session) end
 end
 
 function M.stop()

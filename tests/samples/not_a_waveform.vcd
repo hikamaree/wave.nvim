@@ -1,0 +1,3 @@
+This file is readable but is not a waveform.
+It exists so tests can exercise the parser-rejects-the-file path,
+which is reached only after the viewer window is already open.

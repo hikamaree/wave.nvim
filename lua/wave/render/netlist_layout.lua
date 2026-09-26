@@ -26,7 +26,7 @@ local function emit_level(node, depth, rows)
   for _, ref in ipairs(node.vars) do
     local suffix = ref:bit_suffix()
     rows[#rows + 1] = Row.new(
-      indent .. "[VAR] " .. (ref.path or "?") .. (suffix == "" and "" or " " .. suffix),
+      indent .. "[VAR] " .. (ref.name or "?") .. (suffix == "" and "" or " " .. suffix),
       "var", { ref = ref, parent = node })
   end
 end
@@ -74,7 +74,6 @@ function NetlistLayout:at(line)
   return row.kind, row.owner
 end
 
---- The scope on this line, if it is a scope row.
 ---@param line number
 ---@return ScopeNode|nil
 function NetlistLayout:node_at(line)
@@ -82,7 +81,6 @@ function NetlistLayout:node_at(line)
   return kind == "scope" and owner.node or nil
 end
 
---- The variable on this line, if it is a var row.
 ---@param line number
 ---@return SignalRef|nil
 function NetlistLayout:var_at(line)
@@ -90,7 +88,7 @@ function NetlistLayout:var_at(line)
   return kind == "var" and owner.ref or nil
 end
 
---- The scope that owns this line's entry.
+--- The scope owning this line's entry.
 ---@param line number
 ---@return ScopeNode|nil
 function NetlistLayout:parent_at(line)

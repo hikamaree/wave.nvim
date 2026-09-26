@@ -11,8 +11,7 @@ function TraceList.new()
   return setmetatable({ traces = {}, edges = nil }, TraceList)
 end
 
---- Rebuilt lazily, because a fetch completing invalidates it far more often
---- than anything reads it.
+--- Lazy: a completing fetch invalidates far more often than anything reads.
 function TraceList:_invalidate()
   self.edges = nil
 end
@@ -85,7 +84,7 @@ function TraceList:edge_index()
   return self.edges
 end
 
---- Shortest period across the traces, which sets the zoom ladder's unit.
+--- Shortest period; the zoom ladder's unit.
 ---@return number|nil
 function TraceList:min_period()
   local shortest

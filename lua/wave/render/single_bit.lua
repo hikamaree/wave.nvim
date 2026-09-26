@@ -4,9 +4,8 @@ local Sampler = require("wave.render.sampler")
 
 local M = {}
 
---- Columns holding more transitions than can be drawn individually are shown
---- as a dense band; the neighbours then have to meet that band with a
---- through-shape rather than a dead-end corner.
+--- Columns too dense to draw individually become a band, which neighbours
+--- must meet with a through-shape rather than a dead-end corner.
 ---@param value_changes table|nil
 ---@param scale TimeScale
 ---@return string, string
@@ -59,11 +58,10 @@ function M.paint(value_changes, scale)
       local right_flat = col < width - 1 and s.count[col + 1] == 0
 
       if left_flat and right_flat and v == nv then
-        -- Isolated blip: connects to neither side, so use a half-line toward
-        -- the other row instead of a dangling corner.
+        -- Isolated blip: half-line rather than a dangling corner.
         if v == "1" then bot[c] = "╵" else top[c] = "╷" end
       else
-        -- Drop to a corner on the row the flat neighbour doesn't use.
+        -- Corner on the row the flat neighbour doesn't use.
         if left_flat then
           if v == "1" then bot[c] = "└" else top[c] = "┌" end
         end

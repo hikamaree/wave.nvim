@@ -1,9 +1,6 @@
---- Display-width arithmetic over UTF-8, without the editor.
----
---- Layout has to know how wide a label is before any buffer exists, so it
---- cannot reach for vim.fn.strdisplaywidth. Every glyph the viewer draws —
---- box-drawing runs, "▼", "…" — occupies one cell, so counting codepoints
---- is the same answer.
+--- Display-width arithmetic over UTF-8, without the editor. Layout runs
+--- before any buffer exists. Every glyph drawn is one cell wide, so
+--- counting codepoints gives the same answer as strdisplaywidth.
 
 local M = {}
 
@@ -13,7 +10,6 @@ local function is_continuation(byte)
   return byte >= 0x80 and byte < 0xC0
 end
 
---- Number of display cells `s` occupies.
 ---@param s string
 ---@return number
 function M.width(s)
@@ -24,7 +20,7 @@ function M.width(s)
   return n
 end
 
---- First `cells` display cells of `s`, never splitting a codepoint.
+--- Never splits a codepoint.
 ---@param s string
 ---@param cells number
 ---@return string
@@ -40,7 +36,6 @@ function M.truncate(s, cells)
   return s
 end
 
---- Pads `s` on the right to `cells` display cells.
 ---@param s string
 ---@param cells number
 ---@return string

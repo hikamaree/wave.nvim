@@ -20,6 +20,7 @@ local M = {}
 ---@type WaveConfig
 M.defaults = {
   parser_binary = nil,
+  mouse = true,
   ---@type WaveColors
   colors = {
     signal = "#98c379",
@@ -43,6 +44,10 @@ M.defaults = {
     expand = "<CR>",
     back = "<Backspace>",
     search = "f",
+    down = "j",
+    up = "k",
+    top = "gg",
+    bottom = "G",
     help = "g?",
   },
 }
@@ -59,8 +64,7 @@ local function is_hex_colour(value)
   return type(value) == "string" and value:match("^#%x%x%x%x%x%x$") ~= nil
 end
 
---- Reports anything that would be silently ignored, rather than leaving the
---- user to wonder why their setting had no effect.
+--- Reports anything that would otherwise be silently ignored.
 ---@param opts table
 ---@return string[]
 function M.validate(opts)
@@ -74,6 +78,10 @@ function M.validate(opts)
 
   if opts.parser_binary ~= nil and type(opts.parser_binary) ~= "string" then
     problems[#problems + 1] = "parser_binary must be a string"
+  end
+
+  if opts.mouse ~= nil and type(opts.mouse) ~= "boolean" then
+    problems[#problems + 1] = "mouse must be true or false"
   end
 
   for key, value in pairs(opts.colors or {}) do

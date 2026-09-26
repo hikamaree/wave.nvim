@@ -1,17 +1,4 @@
---- wave.nvim - Waveform viewer for Neovim
----
---- Features:
----   - Open VCD, FST, GHW waveform files
----   - Browse netlist hierarchy in a floating window
----   - Add/remove signals to waveform viewer
----   - Pan, zoom, time markers
----   - Search netlist by signal name
----
---- Usage:
----   :WaveOpen <filename>
----   :WaveToggle
----   :WaveNetlist
----   :WaveClose
+--- wave.nvim - waveform viewer for Neovim. See README.md.
 
 local app = require("wave.app")
 local Actions = require("wave.actions")
@@ -51,7 +38,6 @@ function M.search_netlist()
   app.search_netlist()
 end
 
---- The session for the file currently open, if any.
 ---@return Session|nil
 function M.session()
   return app.session()

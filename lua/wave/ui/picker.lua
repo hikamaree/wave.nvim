@@ -1,8 +1,5 @@
---- Choosing a signal from the file.
----
---- Two backends, because they differ in kind rather than in detail: fzf-lua
---- can stream results as the query changes, vim.ui.select needs the whole
---- list up front. The backend is chosen once, before anything is shown.
+--- Choosing a signal. fzf-lua streams as the query changes, vim.ui.select
+--- needs the list up front; the backend is chosen once, up front.
 
 local log = require("wave.util.log")
 
@@ -23,7 +20,7 @@ local function label(r)
   return string.format("%-40s %s%s", r.instance_path, r.item_type or "", width)
 end
 
---- Variables matching `query`, and whether the parser had more to give.
+--- Variables matching `query`, and whether the parser had more.
 ---@param query string
 ---@param on_results fun(results: table[]|nil, truncated: boolean)
 local function fetch(query, on_results)
@@ -56,7 +53,7 @@ local function actions_for(by_label, on_select)
   }
 end
 
---- The whole list fits: hand it to fzf once and let it filter locally.
+--- The whole list fits: let fzf filter it locally.
 local function fzf_static(fzf, results, on_select)
   local by_label, items = {}, {}
   for _, r in ipairs(results) do
@@ -66,7 +63,7 @@ local function fzf_static(fzf, results, on_select)
   fzf.fzf_exec(items, { prompt = "Signals> ", actions = actions_for(by_label, on_select) })
 end
 
---- Too many to send at once: re-query the parser on each keystroke.
+--- Too many to send at once: re-query on each keystroke.
 local function fzf_live(fzf, on_select)
   local by_label = {}
   fzf.fzf_live(function(args)
@@ -87,7 +84,7 @@ local function fzf_live(fzf, on_select)
   })
 end
 
---- No fzf-lua: ask for a query first, then show what came back.
+--- No fzf-lua: query first, then select.
 local function native(on_select)
   vim.ui.input({ prompt = "Search signals: " }, function(query)
     if not query or query == "" then return end
@@ -110,7 +107,6 @@ local function native(on_select)
   end)
 end
 
---- Opens a picker and calls `on_select` with the chosen search result.
 ---@param on_select fun(result: table)
 function M.prompt(on_select)
   if not _client then

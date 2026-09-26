@@ -1,7 +1,7 @@
---- Samples a signal's value changes onto waveform columns.
----
---- Shared by every painter, so they all agree on which value is in effect in
---- a column and how many transitions that column has to represent.
+--- Samples value changes onto columns. Shared, so every painter agrees on
+--- a column's value and transition count.
+
+local ValueChanges = require("wave.model.value_changes")
 
 local Sampler = {}
 Sampler.__index = Sampler
@@ -18,7 +18,7 @@ local EPS = 1e-12
 ---@return ColumnSamples
 function Sampler.of(value_changes, scale)
   local value, vc_end = {}, {}
-  local idx = 1
+  local idx = ValueChanges.index_at(value_changes, scale.t0)
   for col = 0, scale.cols do
     local col_time = scale:to_time(col)
     while idx < #value_changes and tonumber(value_changes[idx + 1][1]) <= col_time + EPS do
@@ -36,8 +36,8 @@ function Sampler.of(value_changes, scale)
   return setmetatable({ value = value, vc_end = vc_end, count = count }, Sampler)
 end
 
---- A change exactly at the left edge belongs to the previous value, so the
---- transition is drawn rather than swallowed by the viewport boundary.
+--- A change on the left edge belongs to the previous value, so the
+--- transition is drawn rather than swallowed by the boundary.
 ---@param value_changes table
 function Sampler:align_left_edge(value_changes, t0)
   if self.vc_end[0] <= 1 then return end

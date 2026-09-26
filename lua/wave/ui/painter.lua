@@ -1,13 +1,12 @@
---- Writes a layout's Rows into a buffer. The only place in the plugin that
---- sets buffer lines or extmarks.
+--- Rows into a buffer. The only place that sets buffer lines or extmarks.
 
 local Text = require("wave.render.text")
 local highlights = require("wave.ui.highlights")
 
 local M = {}
 
---- Every line is padded to the widest, so the cursor bar has something to
---- sit on all the way down and highlights do not stop short.
+--- Pad to the widest, so the cursor bar has something to sit on all the
+--- way down and highlights do not stop short.
 ---@param rows Row[]
 ---@return string[]
 local function padded_lines(rows)
@@ -25,8 +24,7 @@ local function padded_lines(rows)
   return lines
 end
 
---- Draws the time cursor as an overlay so it sits on top of the waveform
---- without displacing it.
+--- An overlay, so it sits on the waveform without displacing it.
 ---@param buffer ScratchBuffer
 ---@param rows Row[]
 ---@param lines string[]

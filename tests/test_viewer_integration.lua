@@ -417,6 +417,37 @@ end
 
 print()
 
+--- 9b. A nil payload must not be mistaken for data
+print("--- 9b. Nil payload handling ---")
+
+do
+  -- msgpack nil decodes to vim.NIL, which is userdata and therefore truthy,
+  -- so a `resp.data and resp.data[1]` guard used to index it and throw.
+  local p = ParserClient.new(binary_path)
+  check("nil-payload: parser start", p:start())
+
+  local resp, done = nil, false
+  p:open(vcd_path, function()
+    -- A signal id the file does not contain, so the parser answers with none.
+    p:signal_data({ 999999 }, 0, 100, 100, function(r) resp = r; done = true end)
+  end)
+  vim.wait(15000, function() return done end, 10)
+
+  check("nil-payload: got a response", resp ~= nil)
+  if resp then
+    check("nil-payload: data is nil, never vim.NIL",
+      resp.data == nil or type(resp.data) == "table", type(resp.data))
+    local ok = pcall(function()
+      local first = resp.success and resp.data and resp.data[1]
+      return first and first.value_changes
+    end)
+    check("nil-payload: the usual guard is safe", ok)
+  end
+  p:stop()
+end
+
+print()
+
 --- 10. Process crash recovery
 print("--- 10. Process crash recovery ---")
 

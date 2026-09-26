@@ -1,40 +1,39 @@
---- Every viewer action, defined once.
+--- Every viewer action, defined once. The keymaps, <Plug> mappings, help
+--- popup and status bar all read this.
 ---
---- Four tables used to name the same set: the keymap dispatch, the repeatable
---- set, the <Plug> mapping list, and the help text — with the status bar and
---- the help popup each re-deriving the grouping. They all read this now.
----
----   id         the config.keymaps key, and the name shown in the status bar
----   plug       the <Plug>(wave-<plug>) suffix
----   group      status bar and help are ordered and separated by this
----   repeatable honours a count, so "5l" scrolls five steps
----   run        what it does to a session
+---   id            the config.keymaps key, and the name shown in the status bar
+---   plug          the <Plug>(wave-<plug>) suffix
+---   group         status bar and help are ordered and separated by this
+---   repeatable    honours a count, so "5l" scrolls five steps
+---   while_loading still allowed before the file has been parsed
+---   run           what it does to a session
 
 local M = {}
 
 ---@type table[]
 M.list = {
   { id = "close", plug = "close", group = 1, desc = "close the viewer",
+    while_loading = true,
     run = function(s) s:hide_viewer() end },
 
   { id = "scroll_left", plug = "scroll-left", group = 2, repeatable = true,
     desc = "scroll left",
-    run = function(s) s:scroll_left() end },
+    run = function(s, n) s:scroll_left(n) end },
   { id = "scroll_right", plug = "scroll-right", group = 2, repeatable = true,
     desc = "scroll right",
-    run = function(s) s:scroll_right() end },
+    run = function(s, n) s:scroll_right(n) end },
 
   { id = "zoom_in", plug = "zoom-in", group = 3, repeatable = true, desc = "zoom in",
-    run = function(s) s:zoom_in() end },
+    run = function(s, n) s:zoom_in(n) end },
   { id = "zoom_out", plug = "zoom-out", group = 3, repeatable = true, desc = "zoom out",
-    run = function(s) s:zoom_out() end },
+    run = function(s, n) s:zoom_out(n) end },
 
   { id = "prev_edge", plug = "prev-edge", group = 4, repeatable = true,
     desc = "jump to previous edge",
-    run = function(s) s:prev_edge() end },
+    run = function(s, n) s:prev_edge(n) end },
   { id = "next_edge", plug = "next-edge", group = 4, repeatable = true,
     desc = "jump to next edge",
-    run = function(s) s:next_edge() end },
+    run = function(s, n) s:next_edge(n) end },
   { id = "cursor", plug = "set-cursor", group = 4,
     desc = "put the time cursor at the centre",
     run = function(s) s:cursor_to_view() end },
@@ -50,7 +49,20 @@ M.list = {
     desc = "expand a bus into its values",
     run = function(s) s:toggle_expand_at_cursor() end },
 
-  { id = "help", plug = "help", group = 6, desc = "show this help",
+  { id = "down", plug = "cursor-down", group = 6, repeatable = true,
+    desc = "move down a row",
+    run = function(s, n) s:move_cursor(n) end },
+  { id = "up", plug = "cursor-up", group = 6, repeatable = true,
+    desc = "move up a row",
+    run = function(s, n) s:move_cursor(-n) end },
+
+  { id = "top", plug = "go-top", group = 6, desc = "jump to the first signal",
+    run = function(s) s:scroll_extreme(false) end },
+  { id = "bottom", plug = "go-bottom", group = 6, desc = "jump to the last signal",
+    run = function(s) s:scroll_extreme(true) end },
+
+  { id = "help", plug = "help", group = 7, desc = "show this help",
+    while_loading = true,
     run = function(s) s:show_help() end },
 }
 
@@ -63,7 +75,6 @@ function M.by_id(id)
   return nil
 end
 
---- Action ids grouped for display, in definition order.
 ---@return string[][]
 function M.groups()
   local groups, seen = {}, {}
@@ -93,13 +104,22 @@ function M.repeatable()
   return out
 end
 
---- Handlers bound to a session, keyed by action id.
+--- Keys are live on the loading screen, where the viewport is still a
+--- placeholder, so acting on it would strand state the real one never had.
+---@param action table
+---@param session Session
+---@param count number|nil
+function M.invoke(action, session, count)
+  if not action.while_loading and session:is_busy() then return end
+  action.run(session, count or 1)
+end
+
 ---@param session Session
 ---@return table<string, fun()>
 function M.handlers(session)
   local out = {}
   for _, action in ipairs(M.list) do
-    out[action.id] = function() action.run(session) end
+    out[action.id] = function(count) M.invoke(action, session, count) end
   end
   return out
 end

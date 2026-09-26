@@ -1,6 +1,5 @@
--- Golden-file render tests: drives the real plugin end-to-end against the
--- sample waveforms and compares the rendered viewer buffer to recorded output.
--- This is the regression net for the render/layout refactor.
+-- Golden-file render tests: drives the real plugin against the sample
+-- waveforms and diffs the rendered buffer against recorded output.
 --
 --   nvim --headless -u NONE -l tests/golden.lua           compare
 --   nvim --headless -u NONE -l tests/golden.lua update    re-record
@@ -142,8 +141,7 @@ for _, sample in ipairs(SAMPLES) do
 
     local session = wave.session()
     assert(session, "no session after opening " .. sample.path)
-    -- Reopening the same path reuses the session, so start from no traces
-    -- and a fresh viewport for every case.
+    -- Reopening reuses the session, so reset before every case.
     session.traces:clear()
     session.cursor_time = nil
     session.viewport = require("wave.model.viewport").new(session.viewport.file_end)

@@ -1,5 +1,4 @@
---- Finds the parser binary: a local build, then a previous download, then
---- $PATH, then a fresh download.
+--- Finds the parser binary: local build, previous download, $PATH, download.
 
 local downloader = require("wave.install.downloader")
 local log = require("wave.util.log")

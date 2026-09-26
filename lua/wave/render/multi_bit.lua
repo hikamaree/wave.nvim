@@ -1,12 +1,11 @@
---- Paints a bus as a two-row waveform with the value written inside each
---- stable segment, where the segment is wide enough to hold it.
+--- A bus as two rows, with the value inside each segment wide enough for it.
 
 local Sampler = require("wave.render.sampler")
 local ValueFormat = require("wave.render.value_format")
 
 local M = {}
 
---- Fills columns (start_col, end_col] with a segment body, labelled if it fits.
+--- Segment body over (start_col, end_col], labelled if it fits.
 ---@param top string[]
 ---@param bot string[]
 ---@param v string

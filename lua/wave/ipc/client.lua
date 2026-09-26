@@ -1,5 +1,4 @@
 --- Speaks the parser protocol: typed commands in, decoded responses out.
---- Callers never build a command table or track a request id themselves.
 
 local Process = require("wave.ipc.process")
 local FrameReader = require("wave.ipc.reader")
@@ -62,8 +61,7 @@ function ParserClient:is_ready()
   return self.ready and self.process ~= nil
 end
 
---- Restarts after a crash and re-opens whatever file was loaded, so the
---- caller's next command lands on the same state it expected.
+--- Restarts after a crash and re-opens the file that was loaded.
 ---@return boolean
 function ParserClient:try_restart()
   if not self.crashed then return false end
@@ -94,6 +92,17 @@ function ParserClient:_on_exit()
   if self.reader then self.reader:reset() end
 end
 
+--- msgpack nil decodes to vim.NIL, which is userdata and so truthy: a
+--- `resp.data and resp.data[1]` guard would sail straight through it and
+--- throw. Only the response's own fields are scrubbed, never the payload,
+--- which can hold tens of thousands of points.
+---@param response table
+local function drop_nils(response)
+  for key, value in pairs(response) do
+    if value == vim.NIL then response[key] = nil end
+  end
+end
+
 ---@param frame string
 function ParserClient:_on_frame(frame)
   local ok, response = pcall(vim.mpack.decode, frame)
@@ -101,6 +110,11 @@ function ParserClient:_on_frame(frame)
     log.warn("Failed to decode response: " .. tostring(response))
     return
   end
+  if type(response) ~= "table" then
+    log.warn("Parser sent a malformed response")
+    return
+  end
+  drop_nils(response)
 
   local request = self.requests[response.request_id]
   if not request then return end
@@ -122,7 +136,7 @@ function ParserClient:_on_timeout(request)
   request:reject("Request timed out")
 end
 
---- Sends a raw command. Prefer the named methods below.
+--- Raw command; prefer the named methods below.
 ---@param cmd table
 ---@param callback fun(response: table)
 function ParserClient:request(cmd, callback)
@@ -181,8 +195,7 @@ function ParserClient:children(scope_id, start_index, callback)
   self:request({ cmd = "get_children", id = scope_id, start_index = start_index }, callback)
 end
 
---- Pages through get_children until the parser reports nothing remaining, so
---- callers never see start_index or remaining_items.
+--- Pages get_children, so callers never see start_index or remaining_items.
 ---@param scope_id number
 ---@param callback fun(children: {scopes: table[], vars: table[]}|nil)
 function ParserClient:children_all(scope_id, callback)

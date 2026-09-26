@@ -1,8 +1,4 @@
---- The scope hierarchy, as a tree.
----
---- Holding it as data rather than as rendered text is what lets the netlist
---- view answer "which scope is this line" by lookup instead of by matching
---- patterns against its own output.
+--- The scope hierarchy, as a tree rather than as rendered text.
 
 local SignalRef = require("wave.model.signal_ref")
 
@@ -98,7 +94,7 @@ function NetlistTree:collapse(id)
   if node and node ~= self.root then node.expanded = false end
 end
 
---- True when a scope is open but its level has not been fetched yet.
+--- Open, but its level has not been fetched.
 ---@param id number
 ---@return boolean
 function NetlistTree:needs_children(id)

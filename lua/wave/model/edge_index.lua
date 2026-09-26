@@ -1,18 +1,13 @@
 --- Sorted, de-duplicated transition times across every displayed trace.
----
---- One implementation of "where is the next edge", used by cursor placement
---- and by both edge-jump commands.
 
 local EdgeIndex = {}
 EdgeIndex.__index = EdgeIndex
 
--- A guard against pathological files. Past this the index is truncated and
--- navigation covers only the earlier part of the trace set, which beats
--- spending seconds sorting tens of millions of timestamps.
+-- Past this the index is truncated, so navigation covers only the earlier
+-- traces rather than stalling on tens of millions of timestamps.
 local MAX_EDGES = 500000
 
---- Adds one trace's distinct times. Returns false once the cap is reached,
---- so the caller stops walking the remaining traces.
+--- Returns false once the cap is reached, so the caller stops walking.
 ---@param times number[]
 ---@param seen table<number, boolean>
 ---@param value_changes table[]
@@ -45,7 +40,7 @@ function EdgeIndex:count()
   return #self.times
 end
 
---- Greatest edge strictly before `t`.
+--- Strictly before `t`.
 ---@param t number
 ---@return number|nil
 function EdgeIndex:prev(t)
@@ -57,7 +52,7 @@ function EdgeIndex:prev(t)
   return self.times[hi]
 end
 
---- Least edge strictly after `t`.
+--- Strictly after `t`.
 ---@param t number
 ---@return number|nil
 function EdgeIndex:next(t)
@@ -69,7 +64,7 @@ function EdgeIndex:next(t)
   return self.times[lo]
 end
 
---- Greatest edge at or before `t`, unlike prev() which is strict.
+--- At or before `t`, unlike the strict prev().
 ---@param t number
 ---@return number|nil
 function EdgeIndex:floor(t)
@@ -81,7 +76,7 @@ function EdgeIndex:floor(t)
   return self.times[hi]
 end
 
---- Edge closest to `t` in either direction. An edge exactly at `t` wins.
+--- Closest in either direction; an exact hit wins.
 ---@param t number
 ---@return number|nil
 function EdgeIndex:nearest(t)

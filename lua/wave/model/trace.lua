@@ -1,11 +1,9 @@
---- One displayed signal: what it is, the data fetched for it, and how it is
---- currently shown.
+--- One displayed signal, its fetched data, and how it is shown.
 
 local Trace = {}
 Trace.__index = Trace
 
--- Data is fetched for a window wider than the viewport so small pans do not
--- trigger a round trip; a window this much wider than needed is refetched.
+-- Fetch wider than the viewport so small pans need no round trip.
 local FETCH_MARGIN = 1
 local REFETCH_ZOOM_FACTOR = 2
 
@@ -27,7 +25,7 @@ function Trace.signal_id(self)
   return self.ref.signal_id
 end
 
---- The time window to fetch for a viewport, with margin on both sides.
+--- Fetch window for a viewport, with margin on both sides.
 ---@param t0 number
 ---@param t1 number
 ---@return number, number
@@ -36,8 +34,7 @@ function Trace.fetch_window(t0, t1)
   return math.max(0, math.floor(t0 - range * FETCH_MARGIN)), math.ceil(t1 + range * FETCH_MARGIN)
 end
 
---- True when the viewport has moved outside the fetched window, or zoomed in
---- far enough that the held data is much coarser than the view deserves.
+--- Viewport moved outside the fetched window, or zoomed far past its detail.
 ---@param t0 number
 ---@param t1 number
 ---@return boolean
@@ -63,7 +60,6 @@ function Trace:toggle_expand()
   self.expanded = not self.expanded
 end
 
---- Only a bus has anything to expand into.
 ---@return boolean
 function Trace:can_expand()
   return self.ref:is_multi_bit()

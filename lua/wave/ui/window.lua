@@ -1,5 +1,4 @@
---- A window handle that knows whether it is still valid, so callers stop
---- repeating nvim_win_is_valid before every access.
+--- A window handle that knows whether it is still valid.
 
 local Window = {}
 Window.__index = Window
@@ -23,6 +22,11 @@ end
 ---@return number
 function Window:width()
   return self:valid() and vim.api.nvim_win_get_width(self.handle) or 0
+end
+
+---@return number
+function Window:height()
+  return self:valid() and vim.api.nvim_win_get_height(self.handle) or 0
 end
 
 ---@return number
@@ -61,8 +65,7 @@ function Window:restore_view(view)
   vim.api.nvim_win_call(self.handle, function() vim.fn.winrestview(view) end)
 end
 
---- Never closes the last window: the viewer reuses whatever window is
---- current rather than owning one.
+--- Never closes the last window; the viewer does not own one.
 function Window:close()
   if self:valid() and #vim.api.nvim_list_wins() > 1 then
     pcall(vim.api.nvim_win_close, self.handle, true)

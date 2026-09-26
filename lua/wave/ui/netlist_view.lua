@@ -1,10 +1,11 @@
---- The netlist side panel. Renders the Session's scope tree and fetches the
---- levels it still needs.
+--- The netlist side panel over the Session's scope tree.
 
 local NetlistLayout = require("wave.render.netlist_layout")
 local ScratchBuffer = require("wave.ui.buffer")
 local Window = require("wave.ui.window")
 local Painter = require("wave.ui.painter")
+local Mouse = require("wave.ui.mouse")
+local config = require("wave.config")
 local log = require("wave.util.log")
 
 local NetlistView = {}
@@ -54,6 +55,10 @@ function NetlistView.open(session, handlers)
     })
   end
 
+  if config.options.mouse then
+    Mouse.bind_netlist(buffer, { activate = handlers.enter })
+  end
+
   -- :q wipes the buffer before the close handler runs, so track the view.
   vim.api.nvim_create_autocmd({ "CursorMoved", "WinScrolled" }, {
     buffer = buffer.handle,
@@ -75,7 +80,7 @@ function NetlistView:cursor_line()
   return self.window:valid() and self.window:cursor_line() or 0
 end
 
---- Fetches a scope's children, then redraws if the panel is still open.
+--- Fetches children, then redraws if the panel is still open.
 ---@param scope_id number
 ---@param on_loaded fun()|nil
 function NetlistView:load_children(scope_id, on_loaded)
@@ -100,7 +105,7 @@ function NetlistView:load_children(scope_id, on_loaded)
   end)
 end
 
---- A file with a single top scope gets one pointless level; open it eagerly.
+--- A single top scope is one pointless level; open it eagerly.
 ---@param root ScopeNode
 function NetlistView:skip_lone_root(root)
   if #root.scopes ~= 1 or #root.vars > 0 then return end

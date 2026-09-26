@@ -1,6 +1,5 @@
---- User-facing notifications. Every message the plugin emits goes through here
---- so the prefix is written once and callers never have to know whether they
---- are on the main loop or inside a libuv callback.
+--- User-facing notifications. Prefixed once, and safe to call from a libuv
+--- callback as well as the main loop.
 
 local M = {}
 

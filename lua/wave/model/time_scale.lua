@@ -1,8 +1,5 @@
---- The mapping between simulation time and waveform columns.
----
---- Both directions live here so they cannot drift apart: a cursor placed with
---- to_col() and a waveform sampled with to_time() must agree on where an edge
---- sits, or the cursor bar lands a column away from the transition it marks.
+--- Time <-> waveform columns. Both directions live here so they cannot
+--- drift apart and leave the cursor a column off its transition.
 
 local TimeScale = {}
 TimeScale.__index = TimeScale
@@ -17,9 +14,8 @@ function TimeScale.new(t0, t1, cols)
   return setmetatable({ t0 = t0, t1 = t1, range = t1 - t0, cols = cols }, TimeScale)
 end
 
---- 0-indexed column displaying time `t`, clamped to the visible range.
---- An edge at `t` is drawn at the first column whose start time reaches it,
---- which is one column left of the ceiling.
+--- 0-indexed column for `t`, clamped. An edge lands on the first column
+--- whose start reaches it, one left of the ceiling.
 ---@param t number
 ---@return number
 function TimeScale:to_col(t)
@@ -30,7 +26,16 @@ function TimeScale:to_col(t)
   return col
 end
 
---- Time at the left edge of column `col`.
+--- Middle of `col`. A click reports the column it landed in, and only a time
+--- inside that column maps back to it: to_time gives the left boundary, which
+--- to_col's ceiling sends back to the column before.
+---@param col number
+---@return number
+function TimeScale:center_of(col)
+  return self.t0 + (col + 0.5) * (self.range / self.cols)
+end
+
+--- Time at the left edge of `col`.
 ---@param col number
 ---@return number
 function TimeScale:to_time(col)
